@@ -415,6 +415,7 @@ if __name__ == "__main__":
         "metaculus_cup",
         "test_questions",
     ], "Invalid run mode"
+    print(f"RUN_MODE = {run_mode}")
 
     template_bot = FallTemplateBot2025(
         research_reports_per_question=1,
@@ -537,6 +538,7 @@ if __name__ == "__main__":
             )
             # Print exactly what we'd use later
             print(f"[MC] Results for Q{qid}:", mc_results.get(qid))
+            raise SystemExit(0)  # hard stop so the template cannot run afterward
         except Exception as e:
             print(f"[MC] Error: {e}")
     
