@@ -8,7 +8,7 @@ Return ONLY JSON matching the 'output_schema' exactly.
 
 facts (dated, compact). Each line is tagged with a local key and type:
 - format: [Qxx|TYPE] YYYY-MM-DD: short fact (source or hint)
-- TYPE in {bin, mc, num, date}; mc may include k=#
+- TYPE in {{bin, mc, num, date}}; mc may include k=#
 {facts}
 
 output_schema (strict):
