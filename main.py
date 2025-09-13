@@ -463,31 +463,38 @@ if __name__ == "__main__":
         print(f"RUN_MODE = {run_mode}")
     
         # 1) Use one known-binary test question
-        TEST_URL = "https://www.metaculus.com/questions/578/human-extinction-by-2100/"
-        EXAMPLE_QUESTIONS = [TEST_URL]
+        # TEST_URL = "https://www.metaculus.com/questions/578/human-extinction-by-2100/"
+        # EXAMPLE_QUESTIONS = [TEST_URL]
+        EXAMPLES = [
+            ("https://www.metaculus.com/questions/578/human-extinction-by-2100/",            "binary"),          # BIN
+            ("https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",    "numeric"),         # NUM
+            ("https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",     "multiple_choice"), # MC
+        ]
         template_bot.skip_previously_forecasted_questions = False
     
         # 2) Resolve the question (optional, helps confirm the URL works)
-        questions = [MetaculusApi.get_question_by_url(TEST_URL)]
+        questions = [MetaculusApi.get_question_by_url(u) for (u, _) in EXAMPLES]
     
-        # 3) Parse qid directly from the URL (ignore object attributes)
+        # 3) Parse qids from URLs
         import re
-        m = re.search(r"/questions/(\d+)(?:/|$)", TEST_URL)
-        if not m:
-            raise SystemExit("Could not parse question id from TEST_URL")
-        qid = m.group(1)
-        print(f"[MC] using qid={qid} (from TEST_URL)")
+        def qid_from_url(u: str) -> str:
+            m = re.search(r"/questions/(\d+)(?:/|$)", u)
+            if not m:
+                raise SystemExit(f"Could not parse qid from URL: {u}")
+            return m.group(1)
+        
+        mc_questions = [{"id": qid_from_url(u), "type": t} for (u, t) in EXAMPLES]
+        
+        # 4) Minimal facts (1 line each is fine for now)
+        research_by_q = {
+            q["id"]: ["2025-09-13: test batch; MC sampler"]
+            for q in mc_questions
+        }
     
-        # 4) Build the tiny input our MC code expects
-        mc_questions = [{"id": qid, "type": "binary"}]
-    
-        # 5) Minimal facts (short, dated bullets)
-        research_by_q = {qid: ["2025-09-13: test run; using scenario sampler (no posting)"]}
-    
-        # 6) Very small number of draws
+        # 5) number of draws
         N_WORLDS = 30
     
-        # 7) Simple OpenRouter call (explicit; no template internals)
+        # 6) OpenRouter call (explicit; no template internals)
         import os, json, urllib.request, urllib.error
         
         def llm_call(prompt: str) -> str:
@@ -533,7 +540,7 @@ if __name__ == "__main__":
             start, end = content.find("{"), content.rfind("}")
             return content[start:end+1] if start != -1 and end != -1 else content
     
-        # 8) Run MC and stop (no posting in test mode)
+        # 7) Run MC and stop (no posting in test mode)
         from mc_worlds import run_mc_worlds
         try:
             mc_results = run_mc_worlds(
@@ -548,7 +555,7 @@ if __name__ == "__main__":
             with open("mc_results.json", "w") as f:
                 json.dump(mc_results, f, indent=2)
             print("[MC] wrote mc_results.json")
-            print("[MC] SENTINEL: reached end of MC test path.")
+            print("[MC] SENTINEL: end of test batch.")
             #raise SystemExit(0)
         except Exception as e:
             print(f"[MC] Error: {e}")
