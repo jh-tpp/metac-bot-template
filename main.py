@@ -485,7 +485,7 @@ if __name__ == "__main__":
         research_by_q = {qid: ["2025-09-13: test run; using scenario sampler (no posting)"]}
     
         # 6) Very small number of draws
-        N_WORLDS = 3
+        N_WORLDS = 30
     
         # 7) Simple OpenRouter call (explicit; no template internals)
         import os, json, urllib.request, urllib.error
@@ -544,6 +544,10 @@ if __name__ == "__main__":
                 batch_size=12,
             )
             print(f"[MC] Results for Q{qid}:", mc_results.get(qid))
+            import json
+            with open("mc_results.json", "w") as f:
+                json.dump(mc_results, f, indent=2)
+            print("[MC] wrote mc_results.json")
             print("[MC] SENTINEL: reached end of MC test path.")
             raise SystemExit(0)
         except Exception as e:
