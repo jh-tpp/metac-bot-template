@@ -60,3 +60,9 @@ jobs:
         run: |
           git rev-parse --short HEAD
           poetry run python main.py --mode test_questions
+      - name: Upload MC results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-results
+          path: mc_results.json
