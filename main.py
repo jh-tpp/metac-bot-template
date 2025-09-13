@@ -545,7 +545,10 @@ if __name__ == "__main__":
             def synth_reasons_batch(world_summaries, mc_questions, meta_by_q, forecasts, n_worlds, llm_call):
                 # limit token use
                 subset = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
-                summaries_block = "\n".join(f"- {s.replace('\n', ' ').strip()}" for s in subset)
+
+                def _one_line(text: str) -> str:
+                    return text.replace("\n", " ").replace("\r", " ").strip()
+                summaries_block = "\n".join("- " + _one_line(s) for s in subset)
     
                 # compact question lines w/ forecasts
                 qlines = []
