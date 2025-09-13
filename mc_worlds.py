@@ -303,6 +303,15 @@ def run_mc_worlds(
             except Exception as e:
                 print(f"[MC][WARN] world {j+1}/{n_worlds} failed: {e}")
 
+        # Debug dump of parsed worlds (one JSON per line)
+        with open("mc_worlds_raw.jsonl", "a") as f:
+            for w in worlds:
+                f.write(json.dumps(w, ensure_ascii=False) + "\n")
+        
+        # Also save the exact FACTS digest we used for this batch
+        with open("mc_facts_digest.txt", "a") as f:
+            f.write(digest["facts"] + "\n---\n")
+
         forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
         if return_summaries:
             all_summaries.extend(collect_world_summaries(worlds))
