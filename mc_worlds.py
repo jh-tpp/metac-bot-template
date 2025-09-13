@@ -3,6 +3,15 @@ from typing import List, Dict, Any, Tuple
 import json
 import datetime as dt
 
+# --- MC smoothing / clamps ---
+BINARY_LAPLACE_ALPHA = 1.0   # Beta(1,1) Laplace smoothing
+BINARY_LAPLACE_BETA  = 1.0
+PROB_FLOOR = 0.01            # final clamp for binary probs
+PROB_CEIL  = 0.99
+
+MC_DIRICHLET_ALPHA = 0.5     # add-0.5 to each MC option before normalizing
+
+
 WORLD_PROMPT = """You are sampling ONE plausible future 'world' consistent with the facts below.
 Return ONLY JSON matching the 'output_schema' exactly.
 
@@ -122,15 +131,24 @@ def aggregate_worlds(
         xs = d["samples"]
         n = max(1, len(xs))
         if t == "binary":
-            p = sum(xs) / n
-            forecasts[qid] = {"binary": {"p": max(0.001, min(0.999, p))}}
+          # Laplace smoothing so 0/n and n/n don't hit 0 or 1
+          k = sum(xs)
+          alpha = BINARY_LAPLACE_ALPHA
+          beta  = BINARY_LAPLACE_BETA
+          p = (k + alpha) / (n + alpha + beta)
+          p = max(PROB_FLOOR, min(PROB_CEIL, p))
+          forecasts[qid] = {"binary": {"p": p}}
         elif t == "multiple_choice":
             k = d["mc_k"] or (max(xs) + 1 if xs else 1)
             counts = [0] * k
             for i in xs:
                 if 0 <= i < k:
                     counts[i] += 1
-            probs = [c / n for c in counts]
+            # Dirichlet smoothing so empty/rare options get >0 mass
+            k_opts = k
+            counts = [c + MC_DIRICHLET_ALPHA for c in counts]
+            total = sum(counts)
+            probs = [c/total for c in counts]
             forecasts[qid] = {"multiple_choice": {"probs": probs}}
         elif t == "numeric":
             vals = sorted(xs)
