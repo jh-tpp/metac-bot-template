@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import json
 from datetime import datetime
 from typing import Literal
 
@@ -26,7 +27,7 @@ from forecasting_tools import (
 logger = logging.getLogger(__name__)
 
 # main.py (excerpt)
-from mc_worlds import build_batch_digest, sample_one_world, aggregate_worlds, make_comment
+from mc_worlds import run_mc_worlds
 
 class FallTemplateBot2025(ForecastBot):
     """
@@ -390,59 +391,40 @@ if __name__ == "__main__":
             template_bot.forecast_questions(questions, return_exceptions=True)
         )
     elif run_mode == "test_questions":
-
+        # ---------------------- Config: 3 example questions ----------------------
+        EXAMPLES = [
+            ("https://www.metaculus.com/questions/578/human-extinction-by-2100/",            "binary"),
+            ("https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",    "numeric"),
+            ("https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",     "multiple_choice"),
+        ]
+        template_bot.skip_previously_forecasted_questions = False
+    
+        # ---------------------- Resolve objects (optional sanity) ----------------
+        questions = [MetaculusApi.get_question_by_url(u) for (u, _) in EXAMPLES]
+    
+        # ---------------------- Helpers to extract id/title/options --------------
         def qid_from_url(u: str) -> str:
             import re
             m = re.search(r"/questions/(\d+)(?:/|$)", u)
             if not m:
                 raise SystemExit(f"Could not parse qid from URL: {u}")
             return m.group(1)
-        
-        def mc_option_count(q_obj) -> int | None:
-            # Try attributes
-            for attr in ("options", "choices", "answer_options", "options_text"):
-                v = getattr(q_obj, attr, None)
-                if isinstance(v, list):
-                    return len(v)
-            # Try pydantic dump
-            try:
-                d = q_obj.model_dump()
-                for k in ("options", "choices", "answer_options", "options_text"):
-                    v = d.get(k)
-                    if isinstance(v, list):
-                        return len(v)
-            except Exception:
-                pass
-            return None
-            
-        # 1) Use one known-binary test question
-        # TEST_URL = "https://www.metaculus.com/questions/578/human-extinction-by-2100/"
-        # EXAMPLE_QUESTIONS = [TEST_URL]
-        EXAMPLES = [
-            ("https://www.metaculus.com/questions/578/human-extinction-by-2100/",            "binary"),          # BIN
-            ("https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",    "numeric"),         # NUM
-            ("https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",     "multiple_choice"), # MC
-        ]
-        template_bot.skip_previously_forecasted_questions = False
     
-        # 2) Resolve the question (optional, helps confirm the URL works)
-        questions = [MetaculusApi.get_question_by_url(u) for (u, _) in EXAMPLES]
-    
-        # 3) Parse qids from URLs
         def qtitle(q_obj) -> str:
             for attr in ("title", "name", "question_title"):
                 v = getattr(q_obj, attr, None)
-                if v: return str(v)
+                if v:
+                    return str(v)
             try:
                 d = q_obj.model_dump()
                 for k in ("title", "name", "question_title"):
-                    if d.get(k): return str(d[k])
+                    if d.get(k):
+                        return str(d[k])
             except Exception:
                 pass
             return ""
-        
+    
         def mc_options_text(q_obj):
-            # return list of option strings if present
             for attr in ("options", "choices", "answer_options", "options_text"):
                 v = getattr(q_obj, attr, None)
                 if isinstance(v, list) and v and isinstance(v[0], str):
@@ -455,58 +437,61 @@ if __name__ == "__main__":
                         return v
             except Exception:
                 pass
-            return None
-        
+            return []
+    
+        # ---------------------- Build compact MC input questions -----------------
         mc_questions = []
         meta_by_q = {}
         for (u, t), obj in zip(EXAMPLES, questions):
             qid = qid_from_url(u)
             title = qtitle(obj)
             entry = {"id": qid, "type": t, "title": title}
-            md = {"title": title}
+            meta = {"title": title}
             if t == "multiple_choice":
                 opts = mc_options_text(obj)
                 entry["options"] = opts
                 entry["k"] = len(opts) if opts else None
-                md["options"] = opts
-            meta_by_q[qid] = md
+                meta["options"] = opts
             mc_questions.append(entry)
-        
-        # Minimal neutral facts; do NOT mention “sampler” or prompts.
+            meta_by_q[qid] = meta
+    
+        # ---------------------- Neutral “facts” per question ---------------------
         from datetime import date
         today = date.today().isoformat()
-        research_by_q = {q["id"]: [f"{today}: no notable updates; use question text and base rates"]
-                         for q in mc_questions}
+        research_by_q = {
+            q["id"]: [f"{today}: no notable updates; use question text and base rates"]
+            for q in mc_questions
+        }
     
-        # 5) number of draws
+        # ---------------------- World sampling config ----------------------------
         N_WORLDS = 30
     
-        # 6) OpenRouter call (explicit; no template internals)
+        # ---------------------- LLM call for world sampling ----------------------
         import os, json, time, random, urllib.request, urllib.error
-
+    
         FALLBACK_MODELS = [
-            "openai/gpt-4o-mini",          # first choice
-            "openrouter/auto",             # router fallback
-            "google/gemini-1.5-flash",     # cheap/fast fallback
+            "openai/gpt-4o-mini",
+            "openrouter/auto",
+            "google/gemini-1.5-flash",
         ]
-        MAX_RETRIES = 4  # per model
+        MAX_RETRIES = 4
         BACKOFF_CAP = 10.0
-        
+    
         def llm_call(prompt: str) -> str:
             api_key = os.environ["OPENROUTER_API_KEY"]
-        
+    
             def try_once(model: str):
                 data = {
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences."},
+                        {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences, no meta."},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.2,
                     "top_p": 1,
                     "response_format": {"type": "json_object"},
-                    "max_tokens": 800,
-                    "seed": 12345,  # some models ignore it; harmless
+                    "max_tokens": 900,
+                    "seed": 12345,
                 }
                 req = urllib.request.Request(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -522,8 +507,8 @@ if __name__ == "__main__":
                     body = json.loads(resp.read().decode("utf-8"))
                 content = body["choices"][0]["message"]["content"]
                 s, e = content.find("{"), content.rfind("}")
-                return content[s:e+1] if s != -1 and e != -1 else content
-        
+                return content[s:e + 1] if s != -1 and e != -1 else content
+    
             for model in FALLBACK_MODELS:
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
@@ -531,23 +516,16 @@ if __name__ == "__main__":
                     except urllib.error.HTTPError as e:
                         code = e.code
                         msg = e.read().decode("utf-8", "ignore")
-                        print(f"[MC][LLM] HTTP {code} on {model} attempt {attempt}: {msg[:200]}")
-                        # Only retry on transient codes
+                        print(f"[MC][LLM] HTTP {code} on {model} attempt {attempt}: {msg[:160]}")
                         if code not in (429, 500, 502, 503, 504):
                             raise
                     except urllib.error.URLError as e:
                         print(f"[MC][LLM] URL error on {model} attempt {attempt}: {getattr(e, 'reason', e)}")
-                    # backoff with jitter
-                    sleep_s = min(2 ** attempt, BACKOFF_CAP) + random.random()
-                    time.sleep(sleep_s)
+                    time.sleep(min(2 ** attempt, BACKOFF_CAP) + random.random())
                 print(f"[MC][LLM] model fallback: switching from {model}")
             raise RuntimeError("All OpenRouter model fallbacks exhausted")
-
     
-        # 7) Run MC and stop (no posting in test mode)
-        from mc_worlds import run_mc_worlds
-        import json
-
+        # ---------------------- Run worlds and aggregate -------------------------
         try:
             mc_results, world_summaries = run_mc_worlds(
                 open_questions=mc_questions,
@@ -555,18 +533,21 @@ if __name__ == "__main__":
                 llm_call=llm_call,
                 n_worlds=N_WORLDS,
                 batch_size=12,
-                return_evidence=True,
+                return_summaries=True,   # <— matches mc_worlds.py
             )
-
+    
+            # Save forecasts for inspection (CI artifact step expects this)
+            with open("mc_results.json", "w") as f:
+                json.dump(mc_results, f, indent=2)
+            print("[MC] wrote mc_results.json")
+    
+            # ------------------ One cheap synth pass for question rationales ------
             def synth_reasons_batch(world_summaries, mc_questions, meta_by_q, forecasts, n_worlds, llm_call):
-                """
-                One LLM call that returns per-qid bullets from shared world_summaries.
-                """
-                # Keep token usage sane: take first 12 summaries (or sample).
-                sample = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
-                summaries_block = "\n\n".join(f"- {s.replace('\n', ' ').strip()}" for s in sample)
-            
-                # Build compact question list with forecast extracts
+                # limit token use
+                subset = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
+                summaries_block = "\n".join(f"- {s.replace('\n', ' ').strip()}" for s in subset)
+    
+                # compact question lines w/ forecasts
                 qlines = []
                 for q in mc_questions:
                     qid, qtype = q["id"], q["type"]
@@ -574,205 +555,77 @@ if __name__ == "__main__":
                     line = {"qid": qid, "type": qtype, "title": title}
                     f = forecasts.get(qid, {})
                     if qtype == "binary":
-                        p = f.get("binary", {}).get("p")
-                        line["forecast"] = {"p_yes": p}
+                        line["forecast"] = {"p_yes": f.get("binary", {}).get("p")}
                     elif qtype == "multiple_choice":
                         probs = f.get("multiple_choice", {}).get("probs", [])
-                        if probs:
-                            top = max(range(len(probs)), key=lambda i: probs[i])
-                            name = (q.get("options", [])[top] if 0 <= top < len(q.get("options", [])) else f"option {top}")
-                            line["forecast"] = {"top_index": top, "top_name": name, "top_p": probs[top], "k": len(probs)}
-                        else:
-                            line["forecast"] = {"top_index": 0, "top_name": "unknown", "top_p": 0.0, "k": q.get("k")}
+                        opts  = q.get("options", [])
+                        top_i = max(range(len(probs)), key=lambda i: probs[i]) if probs else 0
+                        top_n = opts[top_i] if 0 <= top_i < len(opts) else f"option {top_i}"
+                        line["forecast"] = {"k": len(probs), "top_index": top_i, "top_name": top_n, "top_p": probs[top_i] if probs else None}
                     elif qtype == "numeric":
                         grid = f.get("numeric", {}).get("grid", [])
                         cdf  = f.get("numeric", {}).get("cdf", [])
-                        def pct(x):
-                            return next((vx for vx, y in zip(grid, cdf) if y >= x), grid[-1] if grid else None)
+                        def pct(p):
+                            return next((vx for vx, y in zip(grid, cdf) if y >= p), grid[-1] if grid else None)
                         if grid and cdf:
-                            line["forecast"] = {"median": pct(0.5), "p10": pct(0.1), "p90": pct(0.9)}
+                            line["forecast"] = {"p10": pct(0.10), "median": pct(0.50), "p90": pct(0.90)}
                     qlines.append(line)
-            
+    
                 import json as _json
                 prompt = (
-                    "You will write short, question-specific rationales using the sampled world summaries.\n"
-                    "Constraints:\n"
-                    "- Address EACH question separately; no generic bullets shared across questions.\n"
-                    "- Use concrete drivers implied by the summaries; no meta (no prompts/JSON/samplers).\n"
-                    "- Output JSON ONLY as {\"reasons\": {qid: [\"b1\",\"b2\",\"b3\"], ...}}.\n\n"
-                    "SAMPLED WORLD SUMMARIES (representative subset):\n"
+                    "Write short, question-specific rationales using the sampled world summaries.\n"
+                    "Rules:\n"
+                    "1) Address EACH question separately; do not reuse the same bullets across questions.\n"
+                    "2) Use concrete drivers implied by the summaries; no meta (no mention of prompts/JSON/samplers).\n"
+                    "3) Return JSON ONLY as {\"reasons\": {qid: [\"b1\",\"b2\",\"b3\"], ...}} with 2–3 bullets per question.\n\n"
+                    "SAMPLED WORLD SUMMARIES (subset):\n"
                     f"{summaries_block}\n\n"
-                    "QUESTIONS WITH CURRENT FORECASTS:\n"
+                    "QUESTIONS AND CURRENT FORECASTS:\n"
                     f"{_json.dumps(qlines, ensure_ascii=False)}"
                 )
-            
+    
                 resp = llm_call(prompt)
                 try:
                     obj = _json.loads(resp)
-                    reasons = obj.get("reasons", {})
-                    # sanitize
-                    clean = {}
-                    for qid, arr in reasons.items():
-                        if not isinstance(arr, list): continue
-                        bullets = [str(b).strip().lstrip("• ").strip() for b in arr if str(b).strip()]
-                        if bullets:
-                            clean[qid] = bullets[:3]
-                    return clean
                 except Exception:
                     return {}
-
-
-            def _clip(s: str, n: int = 160) -> str:
-                s = (s or "").strip().replace("\n", " ")
-                return (s[:n] + "…") if len(s) > n else s
-            
-            def _sample(lst, k):
-                return lst[:k] if len(lst) <= k else lst[:k]
-            
-            def synth_reason(qtype: str, qid: str, forecast: dict, evidence: dict, n_worlds: int) -> str:
-                # Prefer per-world rationales (they mention the actual question)
-                rationale_snips = (evidence.get("rationales") or [])[:6]
-                if not rationale_snips:
-                    # fallback: use world summaries for the modal outcome
-                    if qtype == "binary":
-                        yes = evidence.get("binary_yes", [])
-                        no  = evidence.get("binary_no", [])
-                        rationale_snips = (yes if len(yes) >= len(no) else no)[:6]
-                    elif qtype == "multiple_choice":
-                        mc = evidence.get("mc", {})
-                        if mc:
-                            top = max(mc.keys(), key=lambda k: len(mc[k]))
-                            rationale_snips = mc[top][:6]
-                    else:
-                        rationale_snips = [s for _, s in (evidence.get("numeric") or [])][:6]
-            
-                # One tiny summarization call per question, into 3 bullets.
-                # Our llm_call expects JSON; ask for {"bullets":[...]}.
-                joined = "\n- ".join(rationale_snips)
-                ask = (
-                    "You are writing a compact rationale for a forecast.\n"
-                    "Source snippets:\n- " + joined + "\n\n"
-                    "Write EXACTLY three short bullets (plain language) summarizing the most common drivers and one caveat.\n"
-                    "Output JSON only as {\"bullets\":[\"...\",\"...\",\"...\"]}. No meta, no mention of prompts or samplers."
-                )
-                import json as _json
-                try:
-                    resp = llm_call(ask)
-                    obj = _json.loads(resp)
-                    bullets = obj.get("bullets") or []
-                    bullets = [b.strip("• ").strip() for b in bullets if isinstance(b, str) and b.strip()]
-                    if len(bullets) >= 3:
-                        return "• " + "\n• ".join(bullets[:3])
-                except Exception:
-                    pass
-                # Fallback: compress first 3 snippets
-                return "• " + "\n• ".join([s[:140] + ("…" if len(s) > 140 else "") for s in rationale_snips[:3]])
-
-            
-                # Use the same LLM call (cheap: small prompt)
-                import json as _json
-                data = llm_call(prompt)
-                # Model returns a JSON object or plain text; accept either.
-                try:
-                    obj = _json.loads(data)
-                    text = obj.get("rationale") or obj.get("bullets") or obj.get("text") or ""
-                    if text.strip():
-                        return text.strip()
-                except Exception:
-                    pass
-                return data.strip()
-            
-            # Print every result (works for 1 or many questions)
-            for q in mc_questions:
-                qid_i = q["id"]
-                print(f"[MC] Result Q{qid_i}:", mc_results.get(qid_i))
-        
-            # Save artifact so you (and I) can inspect exact JSON
-            with open("mc_results.json", "w") as f:
-                json.dump(mc_results, f, indent=2)
-            print("[MC] wrote mc_results.json")
-        
-            # --- Optional: generate a short reasoning blurb per question (printed only) ---
-            def _median_from_cdf(grid, cdf):
-                for x, y in zip(grid, cdf):
-                    if y >= 0.5:
-                        return x
-                return grid[-1]
-        
-            def _p10_p90_from_cdf(grid, cdf):
-                p10 = next((x for x, y in zip(grid, cdf) if y >= 0.10), grid[0])
-                p90 = next((x for x, y in zip(grid, cdf) if y >= 0.90), grid[-1])
-                return p10, p90
-        
-            def build_reasoning(qtype, forecast, n_worlds):
-                # 3–4 short lines; enough to satisfy the tournament requirement
-                if qtype == "binary":
-                    p = forecast["binary"]["p"]
-                    return (
-                    )
-                if qtype == "multiple_choice":
-                    probs = forecast["multiple_choice"]["probs"]
-                    top = max(range(len(probs)), key=lambda i: probs[i]) if probs else 0
-                    return (
-                    )
-                if qtype == "numeric":
-                    grid, cdf = forecast["numeric"]["grid"], forecast["numeric"]["cdf"]
-                    med = _median_from_cdf(grid, cdf)
-                    p10, p90 = _p10_p90_from_cdf(grid, cdf)
-                    return (
-                    )
-                if qtype == "date":
-                    # If you return {"date":{"grid_ord":[...],"cdf":[...]}} in tests
-                    return (
-                    )
-                return "Method: scenario draws; empirical aggregation."
-        
-            for q in mc_questions:
-                qid_i, qtype_i = q["id"], q["type"]
-                fore_i = mc_results.get(qid_i)
-                if not fore_i:
-                    continue
-                print(f"[MC][REASON] Q{qid_i}:\n{build_reasoning(qtype_i, fore_i, N_WORLDS)}")
-                reasons = {}
-                for q in mc_questions:
-                    qid_i, qtype_i = q["id"], q["type"]
-                    fore_i = mc_results.get(qid_i)
-                    evid_i = mc_evidence.get(qid_i, {})
-                    if not fore_i:
+                raw = obj.get("reasons", {})
+                clean = {}
+                for qid, arr in raw.items():
+                    if not isinstance(arr, list):
                         continue
-                    txt = synth_reason(qtype_i, qid_i, fore_i, evid_i, N_WORLDS)
-                    reasons[qid_i] = txt
-                    print(f"[MC][REASON] Q{qid_i}:\n{txt}\n")
-                
-                with open("mc_reasons.txt", "w") as f:
-                    for qid_i, txt in reasons.items():
-                        f.write(f"Q{qid_i}\n{txt}\n\n")
-                print("[MC] wrote mc_reasons.txt")
-
+                    bullets = []
+                    seen = set()
+                    for b in arr:
+                        s = str(b).strip().lstrip("• ").strip()
+                        if not s or s.lower().startswith("global tensions"):
+                            # light de-dup and remove overly generic boilerplate we saw earlier
+                            continue
+                        if s in seen:
+                            continue
+                        seen.add(s)
+                        bullets.append(s)
+                        if len(bullets) == 3:
+                            break
+                    if bullets:
+                        clean[qid] = bullets
+                return clean
+    
             reason_map = synth_reasons_batch(world_summaries, mc_questions, meta_by_q, mc_results, N_WORLDS, llm_call)
-
+    
+            # Write reasons file (one block per qid)
             with open("mc_reasons.txt", "w") as f:
                 for q in mc_questions:
                     qid = q["id"]
                     bullets = reason_map.get(qid, [])
-                    if bullets:
-                        txt = "• " + "\n• ".join(bullets)
-                    else:
-                        txt = "• Base rates and signals from sampled worlds; insufficient question-specific detail."
+                    txt = ("• " + "\n• ".join(bullets)) if bullets else "• Drivers synthesized from sampled worlds and base rates."
                     print(f"[MC][REASON] Q{qid}:\n{txt}\n")
                     f.write(f"Q{qid}\n{txt}\n\n")
-            
-            with open("mc_results.json", "w") as f:
-                import json
-                json.dump(mc_results, f, indent=2)
-            print("[MC] wrote mc_results.json")
             print("[MC] wrote mc_reasons.txt")
+    
             print("[MC] SENTINEL: end of test batch.")
             raise SystemExit(0)
-
-            print("[MC] SENTINEL: end of test batch.")
-            raise SystemExit(0)
-        
+    
         except Exception as e:
             print(f"[MC] Error: {e}")
             raise SystemExit(1)
