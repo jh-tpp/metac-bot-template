@@ -43,6 +43,43 @@ output_schema (strict):
 
 # ---------- helpers (all local so this file has no external deps) ----------
 
+def extract_evidence(worlds, key2id):
+    """
+    Build per-question evidence buckets from world samples.
+    Returns: dict[qid] -> {
+        'binary_yes': [summary...],
+        'binary_no':  [summary...],
+        'mc':         {opt_idx: [summary...]},
+        'numeric':    [(value, summary)...],
+        'date':       [(iso_date, summary)...],
+    }
+    """
+    ev = {}
+    for w in worlds:
+        summary = w.get("world_summary", "")
+        for item in w.get("per_question", []):
+            key = item.get("key")
+            qid = key2id.get(key)
+            if not qid:
+                continue
+            d = ev.setdefault(qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []})
+            t = item.get("type")
+            oc = item.get("outcome", {})
+            if t == "binary":
+                yes = bool(oc.get("binary", {}).get("yes"))
+                (d["binary_yes"] if yes else d["binary_no"]).append(summary)
+            elif t == "multiple_choice":
+                idx = int(oc.get("multiple_choice", {}).get("option_index", 0))
+                d["mc"].setdefault(idx, []).append(summary)
+            elif t == "numeric":
+                val = float(oc.get("numeric", {}).get("value", 0.0))
+                d["numeric"].append((val, summary))
+            elif t == "date":
+                iso = oc.get("date", {}).get("iso_date")
+                d["date"].append((iso, summary))
+    return ev
+
+
 def _make_keymaps(batch_questions):
     id2key, key2id, key_specs = {}, {}, {}
     for i, q in enumerate(batch_questions, start=1):
@@ -184,10 +221,12 @@ def run_mc_worlds(
     llm_call,
     n_worlds: int = 3,
     batch_size: int = 12,
+    return_evidence: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Batch questions, sample n_worlds per batch, print, and return forecasts keyed by REAL qid."""
     results: Dict[str, Dict[str, Any]] = {}
     for i in range(0, len(open_questions), batch_size):
+        evidence_by_q = {}  # merged across batches
         batch = open_questions[i:i + batch_size]
         id2key, key2id, key_specs = _make_keymaps(batch)
         digest = build_batch_digest(batch, research_by_q, id2key, key_specs)
@@ -200,6 +239,17 @@ def run_mc_worlds(
                 print(f"[MC][WARN] world {j+1}/{n_worlds} failed: {e}")
 
         forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
+        ev = extract_evidence(worlds, key2id)
+        # merge into evidence_by_q
+        for qid, buckets in ev.items():
+            dst = evidence_by_q.setdefault(qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []})
+            dst["binary_yes"].extend(buckets["binary_yes"])
+            dst["binary_no"].extend(buckets["binary_no"])
+            for opt, arr in buckets["mc"].items():
+                dst["mc"].setdefault(opt, []).extend(arr)
+            dst["numeric"].extend(buckets["numeric"])
+            dst["date"].extend(buckets["date"])
+
         print(f"[MC] Batch {i // batch_size + 1}: {len(worlds)} worlds")
         for q in batch:
             qid = str(q["id"])
@@ -207,4 +257,5 @@ def run_mc_worlds(
                 print(f"[MC] {id2key[qid]} -> {forecasts[qid]}")
                 results[qid] = forecasts[qid]
     print(f"[MC] TOTAL scenario calls: {sum(1 for _ in range(0, len(open_questions), batch_size)) * n_worlds}")
-    return results
+    return (results, evidence_by_q) if return_evidence else results
+
