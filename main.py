@@ -505,20 +505,58 @@ if __name__ == "__main__":
                 raise SystemExit(f"Could not parse qid from URL: {u}")
             return m.group(1)
         
+        def qid_from_url(u: str) -> str:
+            import re
+            m = re.search(r"/questions/(\d+)(?:/|$)", u)
+            if not m:
+                raise SystemExit(f"Could not parse qid from URL: {u}")
+            return m.group(1)
+        
+        def qtitle(q_obj) -> str:
+            for attr in ("title", "name", "question_title"):
+                v = getattr(q_obj, attr, None)
+                if v:
+                    return str(v)
+            try:
+                d = q_obj.model_dump()
+                for k in ("title", "name", "question_title"):
+                    if d.get(k):
+                        return str(d[k])
+            except Exception:
+                pass
+            return ""
+        
+        def mc_options_text(q_obj):
+            # return list of option strings if present
+            for attr in ("options", "choices", "answer_options", "options_text"):
+                v = getattr(q_obj, attr, None)
+                if isinstance(v, list) and v and isinstance(v[0], str):
+                    return v
+            try:
+                d = q_obj.model_dump()
+                for k in ("options", "choices", "answer_options", "options_text"):
+                    v = d.get(k)
+                    if isinstance(v, list) and v and isinstance(v[0], str):
+                        return v
+            except Exception:
+                pass
+            return None
+        
         mc_questions = []
         for (u, t), obj in zip(EXAMPLES, questions):
-            entry = {"id": qid_from_url(u), "type": t}
+            entry = {"id": qid_from_url(u), "type": t, "title": qtitle(obj)}
             if t == "multiple_choice":
-                k = mc_option_count(obj)
-                if k:
-                    entry["k"] = k
+                opts = mc_options_text(obj)
+                if opts:
+                    entry["options"] = opts
+                    entry["k"] = len(opts)
             mc_questions.append(entry)
         
-        # 4) Minimal facts (1 line each is fine for now)
-        research_by_q = {
-            q["id"]: ["2025-09-13: test batch; MC sampler"]
-            for q in mc_questions
-        }
+        # Minimal neutral facts; do NOT mention “sampler” or prompts.
+        from datetime import date
+        today = date.today().isoformat()
+        research_by_q = {q["id"]: [f"{today}: no notable updates; rely on question text and base rates"]
+                         for q in mc_questions}
     
         # 5) number of draws
         N_WORLDS = 30
