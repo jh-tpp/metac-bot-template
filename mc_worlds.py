@@ -12,59 +12,53 @@ PROB_CEIL  = 0.99
 MC_DIRICHLET_ALPHA = 0.5     # add-0.5 to each MC option before normalizing
 
 
-WORLD_PROMPT = """You are sampling ONE plausible future 'world' consistent with the facts below.
+WORLD_PROMPT = """You are sampling ONE plausible future "world" consistent with the metadata and facts below.
 Return ONLY JSON matching the 'output_schema' exactly.
 
-facts (dated, compact). Each line is tagged with a local key and type:
+question_meta:
+{question_meta}
+
+facts (dated, compact). Each line tagged with a local key and type:
 - format: [Qxx|TYPE] YYYY-MM-DD: short fact (source or hint)
 - TYPE in {{bin, mc, num, date}}; mc may include k=#
 {facts}
 
 output_schema (strict):
 {{
-  "world_summary": "100-150 word narrative of the world dynamics",
+  "world_summary": "80-120 word narrative of real-world events (no meta about prompts/samplers)",
   "per_question": [
     {{
       "key": "Qxx",
       "type": "binary|multiple_choice|numeric|date",
+      "rationale": "30-60 words: question-focused reasons drawn from facts/meta; no mention of prompts/samplers/JSON",
       "outcome": {{
         "binary": {{"yes": true/false}},
-        "multiple_choice": {{"option_index": <int>}},  # 0-based
-        "numeric": {{"value": <number>}},
+        "multiple_choice": {{"option_index": <int>}},  // 0-based
+        "numeric": {{"value": <number>}},              // use sensible units implied by title/facts
         "date": {{"iso_date": "YYYY-MM-DD"}}
       }}
     }}
   ]
 }}
-- Include exactly one entry per Qxx appearing in facts.
-- Keep outputs coherent with the facts; if uncertain, be conservative.
+- Include exactly one entry per Qxx appearing in question_meta.
+- Keep outputs coherent with the facts; if uncertain, use base rates and plausible mechanisms.
 - JSON only, no commentary.
 """
 
 # ---------- helpers (all local so this file has no external deps) ----------
 
 def extract_evidence(worlds, key2id):
-    """
-    Build per-question evidence buckets from world samples.
-    Returns: dict[qid] -> {
-        'binary_yes': [summary...],
-        'binary_no':  [summary...],
-        'mc':         {opt_idx: [summary...]},
-        'numeric':    [(value, summary)...],
-        'date':       [(iso_date, summary)...],
-    }
-    """
     ev = {}
     for w in worlds:
         summary = w.get("world_summary", "")
         for item in w.get("per_question", []):
-            key = item.get("key")
-            qid = key2id.get(key)
-            if not qid:
-                continue
-            d = ev.setdefault(qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []})
-            t = item.get("type")
-            oc = item.get("outcome", {})
+            key = item.get("key"); qid = key2id.get(key)
+            if not qid: continue
+            d = ev.setdefault(qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": [], "rationales": []})
+            t = item.get("type"); oc = item.get("outcome", {})
+            rationale = item.get("rationale", "")
+            if rationale:
+                d["rationales"].append(rationale)
             if t == "binary":
                 yes = bool(oc.get("binary", {}).get("yes"))
                 (d["binary_yes"] if yes else d["binary_no"]).append(summary)
@@ -78,7 +72,6 @@ def extract_evidence(worlds, key2id):
                 iso = oc.get("date", {}).get("iso_date")
                 d["date"].append((iso, summary))
     return ev
-
 
 def _make_keymaps(batch_questions):
     id2key, key2id, key_specs = {}, {}, {}
@@ -97,29 +90,43 @@ def _make_keymaps(batch_questions):
         key_specs[key] = spec
     return id2key, key2id, key_specs
 
-def build_batch_digest(
-    batch_questions: List[Dict[str, Any]],
-    research: Dict[str, List[str]],
-    id2key: Dict[str, str],
-    key_specs: Dict[str, dict],
-) -> Dict[str, str]:
-    """Build the compact 'facts' block for the prompt. No real IDs leak."""
-    lines: List[str] = []
+def _shorten(s: str, n: int = 80) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "…"
+
+def build_batch_digest(batch_questions: List[Dict[str, Any]],
+                       research: Dict[str, List[str]],
+                       id2key: Dict[str,str],
+                       key_specs: Dict[str,dict]) -> Dict[str, str]:
+    # 1) question_meta block
+    meta_lines = []
     for q in batch_questions:
-        qid = str(q["id"])
-        key = id2key[qid]
-        spec = key_specs[key]
+        qid = str(q["id"]); key = id2key[qid]
+        t = key_specs[key]["type"]
+        title = _shorten(q.get("title", ""), 120)
+        if t == "multiple_choice":
+            opts = q.get("options") or []
+            opt_str = "; ".join(f"{i}:{_shorten(o,40)}" for i, o in enumerate(opts[:8]))
+            more = " …" if len(opts) > 8 else ""
+            meta_lines.append(f"- {key} ({t}): {title} | options: {opt_str}{more}")
+        else:
+            meta_lines.append(f"- {key} ({t}): {title}")
+    question_meta = "\n".join(meta_lines[:40])
+
+    # 2) facts block
+    lines = []
+    for q in batch_questions:
+        qid = str(q["id"]); key = id2key[qid]; spec = key_specs[key]
         t = spec["type"]
-        tag = {"binary": "bin", "multiple_choice": "mc", "numeric": "num", "date": "date"}[t]
+        tag = {"binary":"bin","multiple_choice":"mc","numeric":"num","date":"date"}[t]
         extra = ""
-        if t == "multiple_choice" and spec["k"]:
+        if t == "multiple_choice" and spec.get("k"):
             extra = f" k={spec['k']}"
-        if t == "numeric" and spec["units"]:
-            extra = f" units={spec['units']}"
-        bullets = research.get(qid, [])[:5] or ["(no recent facts)"]
-        for b in bullets:
+        for b in (research.get(qid, [])[:5] or ["(no recent facts)"]):
             lines.append(f"- [{key}|{tag}{extra}] {b}")
-    return {"facts": "\n".join(lines[:80])}
+    facts = "\n".join(lines[:80])
+
+    return {"facts": facts, "question_meta": question_meta}
 
 def _extract_json(s: str) -> str:
     """Be tolerant if the model wraps JSON in code fences or text."""
