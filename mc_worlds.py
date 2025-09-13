@@ -175,6 +175,7 @@ def run_mc_worlds(
         batch = open_questions[i:i + batch_size]
         id2key, key2id, key_specs = _make_keymaps(batch)
         digest = build_batch_digest(batch, research_by_q, id2key, key_specs)
+        print("[MC] DIGEST START\n" + digest["facts"] + "\n[MC] DIGEST END")
         worlds = [sample_one_world(llm_call, digest) for _ in range(n_worlds)]
         forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
         print(f"[MC] Batch {i // batch_size + 1}: {len(worlds)} worlds")
