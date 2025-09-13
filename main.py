@@ -545,6 +545,9 @@ if __name__ == "__main__":
             def synth_reasons_batch(world_summaries, mc_questions, meta_by_q, forecasts, n_worlds, llm_call):
                 # limit token use
                 subset = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
+                if not subset:
+                    # fallback: at least one minimal “world” so the model must pick concrete drivers
+                    subset = ["A baseline world with no major recent shocks; outcomes primarily depend on the question’s own mechanisms and usual constraints."]
 
                 def _one_line(text: str) -> str:
                     return text.replace("\n", " ").replace("\r", " ").strip()
@@ -578,15 +581,23 @@ if __name__ == "__main__":
                 prompt = (
                     "Write short, question-specific rationales using the sampled world summaries.\n"
                     "Rules:\n"
-                    "1) Address EACH question separately; do not reuse the same bullets across questions.\n"
-                    "2) Use concrete drivers implied by the summaries; no meta (no mention of prompts/JSON/samplers).\n"
-                    "3) Return JSON ONLY as {\"reasons\": {qid: [\"b1\",\"b2\",\"b3\"], ...}} with 2–3 bullets per question.\n\n"
+                    "1) Give 2–3 bullets per question, tailored to that question only.\n"
+                    "2) Name concrete drivers (real entities, mechanisms, constraints); avoid generic phrases like 'global tensions' or 'base rates'.\n"
+                    "3) Do not mention prompts, samplers, JSON, process, sampled words or synthesis.\n"
+                    "4) Return JSON ONLY as {\"reasons\": {qid: [\"b1\",\"b2\",\"b3\"], ...}}.\n\n"
+                    "5) Coherence. Drivers should make causal sense across outcomes.\n"
                     "SAMPLED WORLD SUMMARIES (subset):\n"
                     f"{summaries_block}\n\n"
                     "QUESTIONS AND CURRENT FORECASTS:\n"
                     f"{_json.dumps(qlines, ensure_ascii=False)}"
                 )
-    
+                
+                GENERIC = {
+                    "drivers synthesized from sampled worlds and base rates".lower(),
+                    "updates will adjust on major news".lower(),
+                    "global tensions are rising".lower(),
+                }
+                
                 resp = llm_call(prompt)
                 try:
                     obj = _json.loads(resp)
@@ -600,11 +611,14 @@ if __name__ == "__main__":
                     bullets = []
                     seen = set()
                     for b in arr:
-                        s = str(b).strip().lstrip("• ").strip()
-                        if not s or s.lower().startswith("global tensions"):
+                        s = str(b).strip().lstrip("• ").strip()     
+                        s_norm = s.lower()
+                        if not s or s_norm.startswith("global tensions"):
                             # light de-dup and remove overly generic boilerplate we saw earlier
                             continue
                         if s in seen:
+                            continue
+                        if any(g in s_norm for g in GENERIC):
                             continue
                         seen.add(s)
                         bullets.append(s)
@@ -621,7 +635,26 @@ if __name__ == "__main__":
                 for q in mc_questions:
                     qid = q["id"]
                     bullets = reason_map.get(qid, [])
-                    txt = ("• " + "\n• ".join(bullets)) if bullets else "• Drivers synthesized from sampled worlds and base rates."
+                    if bullets:
+                        txt = "• " + "\n• ".join(bullets)
+                    else:
+                        # Build a minimally concrete fallback from the forecast itself
+                        f = forecasts[qid]
+                        if q["type"] == "binary":
+                            p = f["binary"]["p"]
+                            txt = f"• Probability {p:.2f} driven by immediate mechanisms in '{meta_by_q[qid]['title']}' (no recent updates)."
+                        elif q["type"] == "multiple_choice":
+                            probs = f["multiple_choice"]["probs"]; opts = q.get("options", [])
+                            top_i = max(range(len(probs)), key=lambda i: probs[i]) if probs else 0
+                            top_name = opts[top_i] if 0 <= top_i < len(opts) else f"option {top_i}"
+                            txt = f"• Top option '{top_name}' due to near-term constraints implied by the question; little contrary evidence."
+                        else:  # numeric
+                            grid = f["numeric"]["grid"]; cdf = f["numeric"]["cdf"]
+                            def pct(p):
+                                return next((vx for vx, y in zip(grid, cdf) if y >= p), grid[-1] if grid else None)
+                            med = pct(0.5)
+                            txt = f"• Median ≈ {med} based on central mass of sampled outcomes; no major shocks noted."
+
                     print(f"[MC][REASON] Q{qid}:\n{txt}\n")
                     f.write(f"Q{qid}\n{txt}\n\n")
             print("[MC] wrote mc_reasons.txt")
