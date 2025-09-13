@@ -488,27 +488,48 @@ if __name__ == "__main__":
         N_WORLDS = 3
     
         # 7) Simple OpenRouter call (explicit; no template internals)
-        import os, json, urllib.request
+        import os, json, urllib.request, urllib.error
+        
         def llm_call(prompt: str) -> str:
             api_key = os.environ["OPENROUTER_API_KEY"]
+        
             data = {
-                "model": "openrouter/openai/gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"},
+                # NOTE: use OpenRouter's model id WITHOUT the "openrouter/" prefix
+                "model": "openai/gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences."},
+                    {"role": "user", "content": prompt},
+                ],
                 "temperature": 0.7,
+                # JSON mode is supported on gpt-4o-mini; keep it on
+                "response_format": {"type": "json_object"},
             }
+        
             req = urllib.request.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=json.dumps(data).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
+                    # These two headers help sponsored keys; set them to your repo
+                    "HTTP-Referer": "https://github.com/jh-tpp/metac-bot-template",
                     "X-Title": "Metaculus MC test",
                 },
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+        
+            try:
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                err = e.read().decode("utf-8", "ignore")
+                print("[MC] OpenRouter HTTPError:", e.code, err[:800])
+                raise
+            except urllib.error.URLError as e:
+                print("[MC] OpenRouter URLError:", getattr(e, "reason", e))
+                raise
+        
             content = body["choices"][0]["message"]["content"]
+            # Extract bare JSON in case the model adds anything
             start, end = content.find("{"), content.rfind("}")
             return content[start:end+1] if start != -1 and end != -1 else content
     
