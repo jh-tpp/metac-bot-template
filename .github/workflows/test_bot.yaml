@@ -47,7 +47,6 @@ jobs:
               print("forecasting_tools: MISSING", e)
               raise
           PY
-
       - name: Run bot (test questions only)
         env:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
