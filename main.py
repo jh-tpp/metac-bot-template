@@ -591,14 +591,83 @@ if __name__ == "__main__":
         import json
 
         try:
-            mc_results = run_mc_worlds(
+            mc_results, mc_evidence = run_mc_worlds(
                 open_questions=mc_questions,
                 research_by_q=research_by_q,
                 llm_call=llm_call,
                 n_worlds=N_WORLDS,
                 batch_size=12,
+                return_evidence=True,
             )
-        
+
+            def _clip(s: str, n: int = 160) -> str:
+                s = (s or "").strip().replace("\n", " ")
+                return (s[:n] + "…") if len(s) > n else s
+            
+            def _sample(lst, k):
+                return lst[:k] if len(lst) <= k else lst[:k]
+            
+            def synth_reason(qtype: str, qid: str, forecast: dict, evidence: dict, n_worlds: int) -> str:
+                # Build a tiny, grounded prompt from world summaries; cheap (one call per question).
+                bullets = []
+                if qtype == "binary":
+                    p = forecast["binary"]["p"]
+                    yes_snips = [_clip(x) for x in _sample(evidence.get("binary_yes", []), 3)]
+                    no_snips  = [_clip(x) for x in _sample(evidence.get("binary_no", []), 3)]
+                    prompt = (
+                        "You are writing a short, concrete rationale for a binary forecast.\n"
+                        f"Monte Carlo estimate: p(Yes)={p:.2f} from {n_worlds} draws.\n"
+                        "Evidence – worlds where the event happens:\n- " + ("\n- ".join(yes_snips) if yes_snips else "(none)") + "\n"
+                        "Evidence – worlds where it does not happen:\n- " + ("\n- ".join(no_snips) if no_snips else "(none)") + "\n"
+                        "Write 3 short bullets:\n"
+                        "• two bullets on the most common drivers pushing toward the forecast,\n"
+                        "• one bullet on the main counter-risk.\n"
+                        "Be specific and factual. No fluff. No meta about sampling. 60–90 words total."
+                    )
+                elif qtype == "multiple_choice":
+                    probs = forecast["multiple_choice"]["probs"]
+                    top = max(range(len(probs)), key=lambda i: probs[i]) if probs else 0
+                    mc_ev = evidence.get("mc", {})
+                    top_snips = [_clip(x) for x in _sample(mc_ev.get(top, []), 3)]
+                    prompt = (
+                        "You are writing a compact rationale for a multiple-choice forecast.\n"
+                        f"Top option: {top} with prob {probs[top]:.2f} from {n_worlds} draws.\n"
+                        "Evidence – worlds consistent with the top option:\n- " + ("\n- ".join(top_snips) if top_snips else "(none)") + "\n"
+                        "Write 3 short bullets naming the 2–3 most common drivers for the top option and one counter-argument.\n"
+                        "Be specific. No meta about sampling. 60–90 words total."
+                    )
+                elif qtype == "numeric":
+                    grid, cdf = forecast["numeric"]["grid"], forecast["numeric"]["cdf"]
+                    # median and a rough 10–90 band
+                    def pct(x): return next((vx for vx, y in zip(grid, cdf) if y >= x), grid[-1])
+                    med = pct(0.5); p10 = pct(0.1); p90 = pct(0.9)
+                    # Use 6 numeric summaries max (by magnitude spread)
+                    numeric_ev = sorted(evidence.get("numeric", []), key=lambda t: t[0])
+                    snips = [_clip(s) for _, s in _sample(numeric_ev, 6)]
+                    band_note = "" if p10 < p90 else " (narrow band due to low variety in sampled worlds)"
+                    prompt = (
+                        "You are writing a compact rationale for a numeric forecast.\n"
+                        f"Central estimate ~{med:.2f}, 10–90% ~[{p10:.2f}, {p90:.2f}]{band_note} from {n_worlds} draws.\n"
+                        "Evidence – brief descriptions from sampled worlds:\n- " + ("\n- ".join(snips) if snips else "(none)") + "\n"
+                        "Write 3 short bullets naming the key upward drivers, key downward drivers, and a caveat about uncertainty.\n"
+                        "Be concrete and succinct. 60–90 words total."
+                    )
+                else:
+                    return "3 bullets: main drivers, counter-driver, caveat."
+            
+                # Use the same LLM call (cheap: small prompt)
+                import json as _json
+                data = llm_call(prompt)
+                # Model returns a JSON object or plain text; accept either.
+                try:
+                    obj = _json.loads(data)
+                    text = obj.get("rationale") or obj.get("bullets") or obj.get("text") or ""
+                    if text.strip():
+                        return text.strip()
+                except Exception:
+                    pass
+                return data.strip()
+            
             # Print every result (works for 1 or many questions)
             for q in mc_questions:
                 qid_i = q["id"]
@@ -665,9 +734,12 @@ if __name__ == "__main__":
                 for q in mc_questions:
                     qid_i, qtype_i = q["id"], q["type"]
                     fore_i = mc_results.get(qid_i)
+                    evid_i = mc_evidence.get(qid_i, {})
                     if not fore_i:
                         continue
-                    reasons[qid_i] = build_reasoning(qtype_i, fore_i, N_WORLDS)
+                    txt = synth_reason(qtype_i, qid_i, fore_i, evid_i, N_WORLDS)
+                    reasons[qid_i] = txt
+                    print(f"[MC][REASON] Q{qid_i}:\n{txt}\n")
                 
                 with open("mc_reasons.txt", "w") as f:
                     for qid_i, txt in reasons.items():
