@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 from keying import make_keymaps
 from mc_worlds import build_batch_digest, sample_one_world, aggregate_worlds, make_comment
 
-def run_mc_worlds(open_questions, research_by_q, llm_call, n_worlds=50, batch_size=12):
+def run_mc_worlds(open_questions, research_by_q, llm_call, n_worlds=3, batch_size=12):
     for i in range(0, len(open_questions), batch_size):
         batch = open_questions[i:i+batch_size]
         id2key, key2id, key_specs = make_keymaps(batch)
