@@ -524,50 +524,67 @@ if __name__ == "__main__":
         N_WORLDS = 30
     
         # 6) OpenRouter call (explicit; no template internals)
-        import os, json, urllib.request, urllib.error
+        import os, json, time, random, urllib.request, urllib.error
+
+        FALLBACK_MODELS = [
+            "openai/gpt-4o-mini",          # first choice
+            "openrouter/auto",             # router fallback
+            "google/gemini-1.5-flash",     # cheap/fast fallback
+        ]
+        MAX_RETRIES = 4  # per model
+        BACKOFF_CAP = 10.0
         
         def llm_call(prompt: str) -> str:
             api_key = os.environ["OPENROUTER_API_KEY"]
         
-            data = {
-                # NOTE: use OpenRouter's model id WITHOUT the "openrouter/" prefix
-                "model": "openai/gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 1.0,
-                # JSON mode is supported on gpt-4o-mini; keep it on
-                "response_format": {"type": "json_object"},
-            }
-        
-            req = urllib.request.Request(
-                "https://openrouter.ai/api/v1/chat/completions",
-                data=json.dumps(data).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    # These two headers help sponsored keys; set them to your repo
-                    "HTTP-Referer": "https://github.com/jh-tpp/metac-bot-template",
-                    "X-Title": "Metaculus MC test",
-                },
-            )
-        
-            try:
+            def try_once(model: str):
+                data = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "top_p": 1,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 800,
+                    "seed": 12345,  # some models ignore it; harmless
+                }
+                req = urllib.request.Request(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    data=json.dumps(data).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                        "HTTP-Referer": "https://github.com/jh-tpp/metac-bot-template",
+                        "X-Title": "Metaculus MC test",
+                    },
+                )
                 with urllib.request.urlopen(req, timeout=90) as resp:
                     body = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                err = e.read().decode("utf-8", "ignore")
-                print("[MC] OpenRouter HTTPError:", e.code, err[:800])
-                raise
-            except urllib.error.URLError as e:
-                print("[MC] OpenRouter URLError:", getattr(e, "reason", e))
-                raise
+                content = body["choices"][0]["message"]["content"]
+                s, e = content.find("{"), content.rfind("}")
+                return content[s:e+1] if s != -1 and e != -1 else content
         
-            content = body["choices"][0]["message"]["content"]
-            # Extract bare JSON in case the model adds anything
-            start, end = content.find("{"), content.rfind("}")
-            return content[start:end+1] if start != -1 and end != -1 else content
+            for model in FALLBACK_MODELS:
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        return try_once(model)
+                    except urllib.error.HTTPError as e:
+                        code = e.code
+                        msg = e.read().decode("utf-8", "ignore")
+                        print(f"[MC][LLM] HTTP {code} on {model} attempt {attempt}: {msg[:200]}")
+                        # Only retry on transient codes
+                        if code not in (429, 500, 502, 503, 504):
+                            raise
+                    except urllib.error.URLError as e:
+                        print(f"[MC][LLM] URL error on {model} attempt {attempt}: {getattr(e, 'reason', e)}")
+                    # backoff with jitter
+                    sleep_s = min(2 ** attempt, BACKOFF_CAP) + random.random()
+                    time.sleep(sleep_s)
+                print(f"[MC][LLM] model fallback: switching from {model}")
+            raise RuntimeError("All OpenRouter model fallbacks exhausted")
+
     
         # 7) Run MC and stop (no posting in test mode)
         from mc_worlds import run_mc_worlds
