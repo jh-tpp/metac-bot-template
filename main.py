@@ -457,13 +457,13 @@ if __name__ == "__main__":
                 MetaculusApi.CURRENT_METACULUS_CUP_ID, return_exceptions=True
             )
         )
-    elif run_mode == "test_questions":
+    elif run_mode == "test_questions_old":
         # Example questions are a good way to test the bot's performance on a single question
         EXAMPLE_QUESTIONS = [
             "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
-            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
-            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
-            "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
+            #"https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
+           # "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
+          #  "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
         ]
         template_bot.skip_previously_forecasted_questions = False
         questions = [
@@ -473,4 +473,83 @@ if __name__ == "__main__":
         forecast_reports = asyncio.run(
             template_bot.forecast_questions(questions, return_exceptions=True)
         )
-    template_bot.log_report_summary(forecast_reports)
+    elif run_mode == "test_questions":
+        # Keep to a single, known-binary test question
+        EXAMPLE_QUESTIONS = [
+            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
+        ]
+        template_bot.skip_previously_forecasted_questions = False
+    
+        # Resolve the Metaculus question object (used by the template if you later want to run it)
+        questions = [
+            MetaculusApi.get_question_by_url(url) for url in EXAMPLE_QUESTIONS
+        ]
+    
+        # --- MC sampler: run 3 scenarios on this single binary test question and PRINT result ---
+        from mc_worlds import run_mc_worlds
+    
+        # Build the tiny input our MC code expects (list of minimal question dicts)
+        qid = str(questions[0].id)  # Metaculus numeric id -> string
+        mc_questions = [{"id": qid, "type": "binary"}]  # this test question is binary
+    
+        # Minimal "research" facts (bullets). Keep it short for now.
+        research_by_q = {
+            qid: ["2025-09-13: test run; using scenario sampler (no posting)"]
+        }
+    
+        # Very small number of draws to keep costs tiny
+        N_WORLDS = 3
+    
+        # Simple, explicit OpenRouter call so we don't rely on unknown template methods
+        import os, json, urllib.request
+        def llm_call(prompt: str) -> str:
+            api_key = os.environ["OPENROUTER_API_KEY"]
+            data = {
+                "model": "openrouter/openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.7,
+            }
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/chat/completions",
+                data=json.dumps(data).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "X-Title": "Metaculus MC test",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            # Extract the JSON content string
+            content = body["choices"][0]["message"]["content"]
+            # If the model wrapped JSON in ``` fences, strip them
+            start, end = content.find("{"), content.rfind("}")
+            return content[start:end+1] if start != -1 and end != -1 else content
+    
+        try:
+            mc_results = run_mc_worlds(
+                open_questions=mc_questions,
+                research_by_q=research_by_q,
+                llm_call=llm_call,
+                n_worlds=N_WORLDS,
+                batch_size=12,
+            )
+            # Print exactly what we'd use later
+            print(f"[MC] Results for Q{qid}:", mc_results.get(qid))
+        except Exception as e:
+            print(f"[MC] Error: {e}")
+    
+        # --- (OPTIONAL) Run the template on the same test question ---
+        # Keep this commented out for now to avoid extra token spend and confusion.
+        # When you want to compare, uncomment these three lines.
+        # forecast_reports = asyncio.run(
+        #     template_bot.forecast_questions(questions, return_exceptions=True)
+        # )
+        # template_bot.log_report_summary(forecast_reports)
+
+    # If the template call is commented out, guard this summary call
+    try:
+        template_bot.log_report_summary(forecast_reports)
+    except NameError:
+        pass
