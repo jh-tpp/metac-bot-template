@@ -2,6 +2,28 @@
 from typing import List, Dict, Any, Tuple
 import json
 import datetime as dt
+import re
+
+def _strip_code_fences(s: str) -> str:
+    s = s.strip()
+    # Trim code fences if present
+    if s.startswith("```"):
+        # remove leading/back fences
+        s = s.strip("`")
+    # Keep only the outermost JSON object if present
+    i, j = s.find("{"), s.rfind("}")
+    return s[i:j+1] if i != -1 and j != -1 else s
+
+def _json_loads_loose(s: str) -> dict:
+    try:
+        return json.loads(s)
+    except Exception:
+        # remove // line comments and /* ... */ block comments
+        s2 = re.sub(r"//.*?$", "", s, flags=re.MULTILINE)
+        s2 = re.sub(r"/\*.*?\*/", "", s2, flags=re.DOTALL)
+        # remove trailing commas
+        s2 = re.sub(r",(\s*[}\]])", r"\1", s2)
+        return json.loads(s2)
 
 # --- MC smoothing / clamps ---
 BINARY_LAPLACE_ALPHA = 1.0   # Beta(1,1) Laplace smoothing
@@ -138,8 +160,23 @@ def _extract_json(s: str) -> str:
     return s[start:end + 1] if start != -1 and end != -1 else s
 
 def sample_one_world(llm_call, digest: Dict[str, str]) -> Dict[str, Any]:
-    out = llm_call(WORLD_PROMPT.format(**digest))
-    return json.loads(_extract_json(out))
+    raw = llm_call(WORLD_PROMPT.format(**digest))
+    text = _strip_code_fences(raw)
+    try:
+        obj = _json_loads_loose(text)
+    except Exception:
+        # Ask the model to repair into valid JSON (single shot)
+        repair_prompt = (
+            "Fix the following so it becomes ONE valid JSON object matching the required schema "
+            "(keys 'world_summary' and 'per_question'). Return JSON only.\n\n"
+            + text
+        )
+        text2 = _strip_code_fences(llm_call(repair_prompt))
+        obj = _json_loads_loose(text2)
+    # Minimal shape check
+    if not isinstance(obj, dict) or "world_summary" not in obj or "per_question" not in obj:
+        raise ValueError("sampler did not return required keys")
+    return obj
 
 def aggregate_worlds(
     batch_questions: List[Dict[str, Any]],
