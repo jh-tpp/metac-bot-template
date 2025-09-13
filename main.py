@@ -475,7 +475,36 @@ if __name__ == "__main__":
         from mc_worlds import run_mc_worlds
     
         # Build the tiny input our MC code expects (list of minimal question dicts)
-        qid = str(questions[0].id)  # Metaculus numeric id -> string
+        import re
+
+        q = questions[0]
+        qid = None
+        
+        # Try common attribute names first
+        for attr in ("question_id", "id", "metaculus_id", "metaculus_question_id"):
+            if hasattr(q, attr):
+                qid = str(getattr(q, attr))
+                break
+        
+        # Pydantic v2: try model_dump
+        if qid is None:
+            try:
+                data = q.model_dump()  # pydantic v2
+                qid = str(data.get("question_id") or data.get("id") or data.get("metaculus_id"))
+            except Exception:
+                pass
+        
+        # Fallback: parse from the URL (works for /questions/578/)
+        if qid is None:
+            m = re.search(r"/questions/(\d+)", EXAMPLE_QUESTIONS[0])
+            if m:
+                qid = m.group(1)
+        
+        if qid is None:
+            raise SystemExit("Could not determine question id from the test question object/URL")
+        
+        print(f"[MC] using qid={qid}")
+
         mc_questions = [{"id": qid, "type": "binary"}]  # this test question is binary
     
         # Minimal "research" facts (bullets). Keep it short for now.
