@@ -24,28 +24,31 @@ facts (dated, compact). Each line tagged with a local key and type:
 {facts}
 
 output_schema (strict):
-{{
-  "world_summary": "80-120 word narrative of real-world events (no meta about prompts/samplers)",
+{
+  "world_summary": "180–300 words: concrete real-world events and mechanisms that most affect the listed questions. No meta (no prompts/JSON/samplers/models).",
   "per_question": [
-    {{
+    {
       "key": "Qxx",
       "type": "binary|multiple_choice|numeric|date",
-      "rationale": "30-60 words: question-focused reasons drawn from facts/meta; no mention of prompts/samplers/JSON",
-      "outcome": {{
-        "binary": {{"yes": true/false}},
-        "multiple_choice": {{"option_index": <int>}},  // 0-based
-        "numeric": {{"value": <number>}},              // use sensible units implied by title/facts
-        "date": {{"iso_date": "YYYY-MM-DD"}}
-      }}
-    }}
+      "outcome": {
+        "binary": {"yes": true/false},
+        "multiple_choice": {"option_index": <int>},  // 0-based
+        "numeric": {"value": <number>},              // sensible units implied by title/facts
+        "date": {"iso_date": "YYYY-MM-DD"}
+      }
+    }
   ]
-}}
-- Include exactly one entry per Qxx appearing in question_meta.
-- Keep outputs coherent with the facts; if uncertain, use base rates and plausible mechanisms.
-- JSON only, no commentary.
+}
+- Include exactly one entry per Qxx from question_meta.
+- Keep outcomes coherent with world dynamics; when uncertain, use outside-view/base rates.
+- JSON only; no commentary.
 """
 
+
 # ---------- helpers (all local so this file has no external deps) ----------
+
+def collect_world_summaries(worlds):
+    return [w.get("world_summary", "").strip() for w in worlds if w.get("world_summary")]
 
 def extract_evidence(worlds, key2id):
     ev = {}
@@ -228,15 +231,15 @@ def run_mc_worlds(
     llm_call,
     n_worlds: int = 3,
     batch_size: int = 12,
-    return_evidence: bool = False,
-) -> Dict[str, Dict[str, Any]] | tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    return_summaries: bool = False,
+) -> Dict[str, Dict[str, Any]] | tuple[Dict[str, Dict[str, Any]], List[str]]:
     """
     Batch questions, sample n_worlds per batch, print progress,
-    and return forecasts keyed by REAL qid.
-    If return_evidence=True, also return per-qid evidence buckets.
+    and return forecasts keyed by real qid.
+    If return_summaries=True, also return a list of all world_summary strings (across batches).
     """
     results: Dict[str, Dict[str, Any]] = {}
-    evidence_by_q: Dict[str, Any] = {}  # <-- moved outside the loop to accumulate across batches
+    all_summaries: List[str] = []
 
     total_attempted = 0
     total_success  = 0
@@ -246,6 +249,8 @@ def run_mc_worlds(
         id2key, key2id, key_specs = _make_keymaps(batch)
         digest = build_batch_digest(batch, research_by_q, id2key, key_specs)
         print("[MC] DIGEST START\n" + digest["facts"] + "\n[MC] DIGEST END")
+        # Optional: print meta so you can inspect titles/options
+        # print("[MC] META START\n" + digest["question_meta"] + "\n[MC] META END")
 
         worlds = []
         for j in range(n_worlds):
@@ -257,19 +262,8 @@ def run_mc_worlds(
                 print(f"[MC][WARN] world {j+1}/{n_worlds} failed: {e}")
 
         forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
-
-        # collect + merge evidence for this batch
-        ev = extract_evidence(worlds, key2id)
-        for qid, buckets in ev.items():
-            dst = evidence_by_q.setdefault(
-                qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []}
-            )
-            dst["binary_yes"].extend(buckets["binary_yes"])
-            dst["binary_no"].extend(buckets["binary_no"])
-            for opt, arr in buckets["mc"].items():
-                dst["mc"].setdefault(opt, []).extend(arr)
-            dst["numeric"].extend(buckets["numeric"])
-            dst["date"].extend(buckets["date"])
+        if return_summaries:
+            all_summaries.extend(collect_world_summaries(worlds))
 
         print(f"[MC] Batch {i // batch_size + 1}: {len(worlds)} worlds")
         for q in batch:
@@ -279,6 +273,7 @@ def run_mc_worlds(
                 results[qid] = forecasts[qid]
 
     print(f"[MC] TOTAL scenarios: {total_success}/{total_attempted} successful")
-    return (results, evidence_by_q) if return_evidence else results
+    return (results, all_summaries) if return_summaries else results
+
 
 
