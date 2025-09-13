@@ -627,6 +627,8 @@ if __name__ == "__main__":
                             break
                     if bullets:
                         clean[qid] = bullets
+                    if not bullets:
+                        raise RuntimeError(f"No usable reasons synthesized for qid {qid}")
                 return clean
     
             reason_map = synth_reasons_batch(world_summaries, mc_questions, meta_by_q, mc_results, N_WORLDS, llm_call)
