@@ -35,10 +35,32 @@ jobs:
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-      - name: Run bot
+      - name: Verify deps are in Poetry venv
+        run: |
+          poetry run python - <<'PY'
+          import sys
+          print("python exe:", sys.executable)
+          try:
+              import forecasting_tools
+              print("forecasting_tools: OK")
+          except Exception as e:
+              print("forecasting_tools: MISSING", e)
+              raise
+          PY
+
+      - name: Run bot (test questions only)
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
         run: |
           git rev-parse --short HEAD
-          python main.py --mode test_questions
+          poetry run python main.py --mode test_questions
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
