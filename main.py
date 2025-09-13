@@ -26,7 +26,6 @@ from forecasting_tools import (
 logger = logging.getLogger(__name__)
 
 # main.py (excerpt)
-from keying import make_keymaps
 from mc_worlds import build_batch_digest, sample_one_world, aggregate_worlds, make_comment
 
 class FallTemplateBot2025(ForecastBot):
