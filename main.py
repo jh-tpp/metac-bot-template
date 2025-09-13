@@ -460,62 +460,34 @@ if __name__ == "__main__":
             template_bot.forecast_questions(questions, return_exceptions=True)
         )
     elif run_mode == "test_questions":
-        # Keep to a single, known-binary test question
-        EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
-        ]
+        print(f"RUN_MODE = {run_mode}")
+    
+        # 1) Use one known-binary test question
+        TEST_URL = "https://www.metaculus.com/questions/578/human-extinction-by-2100/"
+        EXAMPLE_QUESTIONS = [TEST_URL]
         template_bot.skip_previously_forecasted_questions = False
     
-        # Resolve the Metaculus question object (used by the template if you later want to run it)
-        questions = [
-            MetaculusApi.get_question_by_url(url) for url in EXAMPLE_QUESTIONS
-        ]
+        # 2) Resolve the question (optional, helps confirm the URL works)
+        questions = [MetaculusApi.get_question_by_url(TEST_URL)]
     
-        # --- MC sampler: run 3 scenarios on this single binary test question and PRINT result ---
-        from mc_worlds import run_mc_worlds
-    
-        # Build the tiny input our MC code expects (list of minimal question dicts)
+        # 3) Parse qid directly from the URL (ignore object attributes)
         import re
-
-        q = questions[0]
-        qid = None
-        
-        # Try common attribute names first
-        for attr in ("question_id", "id", "metaculus_id", "metaculus_question_id"):
-            if hasattr(q, attr):
-                qid = str(getattr(q, attr))
-                break
-        
-        # Pydantic v2: try model_dump
-        if qid is None:
-            try:
-                data = q.model_dump()  # pydantic v2
-                qid = str(data.get("question_id") or data.get("id") or data.get("metaculus_id"))
-            except Exception:
-                pass
-        
-        # Fallback: parse from the URL (works for /questions/578/)
-        if qid is None:
-            m = re.search(r"/questions/(\d+)", EXAMPLE_QUESTIONS[0])
-            if m:
-                qid = m.group(1)
-        
-        if qid is None:
-            raise SystemExit("Could not determine question id from the test question object/URL")
-        
-        print(f"[MC] using qid={qid}")
-
-        mc_questions = [{"id": qid, "type": "binary"}]  # this test question is binary
+        m = re.search(r"/questions/(\d+)(?:/|$)", TEST_URL)
+        if not m:
+            raise SystemExit("Could not parse question id from TEST_URL")
+        qid = m.group(1)
+        print(f"[MC] using qid={qid} (from TEST_URL)")
     
-        # Minimal "research" facts (bullets). Keep it short for now.
-        research_by_q = {
-            qid: ["2025-09-13: test run; using scenario sampler (no posting)"]
-        }
+        # 4) Build the tiny input our MC code expects
+        mc_questions = [{"id": qid, "type": "binary"}]
     
-        # Very small number of draws to keep costs tiny
+        # 5) Minimal facts (short, dated bullets)
+        research_by_q = {qid: ["2025-09-13: test run; using scenario sampler (no posting)"]}
+    
+        # 6) Very small number of draws
         N_WORLDS = 3
     
-        # Simple, explicit OpenRouter call so we don't rely on unknown template methods
+        # 7) Simple OpenRouter call (explicit; no template internals)
         import os, json, urllib.request
         def llm_call(prompt: str) -> str:
             api_key = os.environ["OPENROUTER_API_KEY"]
@@ -536,12 +508,12 @@ if __name__ == "__main__":
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-            # Extract the JSON content string
             content = body["choices"][0]["message"]["content"]
-            # If the model wrapped JSON in ``` fences, strip them
             start, end = content.find("{"), content.rfind("}")
             return content[start:end+1] if start != -1 and end != -1 else content
     
+        # 8) Run MC and stop (no posting in test mode)
+        from mc_worlds import run_mc_worlds
         try:
             mc_results = run_mc_worlds(
                 open_questions=mc_questions,
@@ -550,21 +522,14 @@ if __name__ == "__main__":
                 n_worlds=N_WORLDS,
                 batch_size=12,
             )
-            # Print exactly what we'd use later
             print(f"[MC] Results for Q{qid}:", mc_results.get(qid))
-            raise SystemExit(0)  # hard stop so the template cannot run afterward
+            print("[MC] SENTINEL: reached end of MC test path.")
+            raise SystemExit(0)
         except Exception as e:
             print(f"[MC] Error: {e}")
-    
-        # --- (OPTIONAL) Run the template on the same test question ---
-        # Keep this commented out for now to avoid extra token spend and confusion.
-        # When you want to compare, uncomment these three lines.
-        # forecast_reports = asyncio.run(
-        #     template_bot.forecast_questions(questions, return_exceptions=True)
-        # )
-        # template_bot.log_report_summary(forecast_reports)
+            raise SystemExit(1)
 
-    # If the template call is commented out, guard this summary call
+
     try:
         template_bot.log_report_summary(forecast_reports)
     except NameError:
