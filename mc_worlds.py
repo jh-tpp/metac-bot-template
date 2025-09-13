@@ -43,11 +43,8 @@ output_schema (strict):
 
 # ---------- helpers (all local so this file has no external deps) ----------
 
-def _make_keymaps(batch_questions: List[Dict[str, Any]]) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, dict]]:
-    """Create anonymized keys and minimal specs for the batch."""
-    id2key: Dict[str, str] = {}
-    key2id: Dict[str, str] = {}
-    key_specs: Dict[str, dict] = {}
+def _make_keymaps(batch_questions):
+    id2key, key2id, key_specs = {}, {}, {}
     for i, q in enumerate(batch_questions, start=1):
         key = f"Q{i:02d}"
         qid = str(q["id"])
@@ -56,7 +53,8 @@ def _make_keymaps(batch_questions: List[Dict[str, Any]]) -> Tuple[Dict[str, str]
         key2id[key] = qid
         spec = {"type": qtype, "k": None, "units": None}
         if qtype == "multiple_choice":
-            spec["k"] = len(q.get("options", [])) or None
+            # accept explicit k from q or infer from q["options"]
+            spec["k"] = q.get("k") or (len(q.get("options", [])) if isinstance(q.get("options"), list) else None)
         if qtype == "numeric":
             spec["units"] = q.get("units")
         key_specs[key] = spec
