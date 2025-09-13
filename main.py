@@ -549,10 +549,10 @@ if __name__ == "__main__":
                 json.dump(mc_results, f, indent=2)
             print("[MC] wrote mc_results.json")
             print("[MC] SENTINEL: reached end of MC test path.")
-            raise SystemExit(0)
+            #raise SystemExit(0)
         except Exception as e:
             print(f"[MC] Error: {e}")
-            raise SystemExit(1)
+            #raise SystemExit(1)
 
 
     try:
