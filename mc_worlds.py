@@ -34,37 +34,42 @@ PROB_CEIL  = 0.99
 MC_DIRICHLET_ALPHA = 0.5     # add-0.5 to each MC option before normalizing
 
 
-WORLD_PROMPT = """You are sampling ONE plausible future "world" consistent with the metadata and facts below.
-Return ONLY JSON matching the 'output_schema' exactly.
+WORLD_PROMPT = """
+Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
-question_meta:
-{question_meta}
-
-facts (dated, compact). Each line tagged with a local key and type:
-- format: [Qxx|TYPE] YYYY-MM-DD: short fact (source or hint)
-- TYPE in {{bin, mc, num, date}}; mc may include k=#
-{facts}
-
-output_schema (strict):
+Schema (all keys required):
 {
-  "world_summary": "180–300 words: concrete real-world events and mechanisms that most affect the listed questions. No meta (no prompts/JSON/samplers/models).",
+  "world_summary": "string, 180–300 words describing the world dynamics that jointly drive the outcomes below, plain English, concise.",
   "per_question": [
     {
-      "key": "Qxx",
-      "type": "binary|multiple_choice|numeric|date",
+      "key": "Q01",
+      "type": "binary|multiple_choice|numeric",
       "outcome": {
-        "binary": {"yes": true/false},
-        "multiple_choice": {"option_index": <int>},  // 0-based
-        "numeric": {"value": <number>},              // sensible units implied by title/facts
-        "date": {"iso_date": "YYYY-MM-DD"}
+        "binary": { "yes": true },
+        "multiple_choice": { "option_index": 0 },
+        "numeric": { "value": 12.3 }
       }
     }
   ]
 }
-- Include exactly one entry per Qxx from question_meta.
-- Keep outcomes coherent with world dynamics; when uncertain, use outside-view/base rates.
-- JSON only; no commentary.
+
+Superforecaster discipline:
+- Tetlockian technique: start with the outside view and base rates; consider alt. hypotheses and common biases; set explicit assumptions internally (do not output them).
+- Coherence: outcomes must be mutually consistent, causally linked to drivers in the summary.
+- Causal model: before filling JSON, internally build a causal model that ties drivers → outcomes over the same world.
+
+Rules:
+- Include exactly one entry in "per_question" for each question key present in FACTS.
+- Match each entry’s "type" to the fact tag (bin, mc, num).
+- For multiple_choice, "option_index" must be in [0, k-1] (k may appear in the fact tag, e.g., "mc k=6").
+- For numeric, choose a single plausible value for this world.
+- Be conservative under uncertainty; keep all outputs consistent with FACTS.
+- Output PURE JSON only (no prose, no code fences).
+
+FACTS:
+{facts}
 """
+
 
 
 # ---------- helpers (all local so this file has no external deps) ----------
