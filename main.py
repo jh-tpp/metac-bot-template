@@ -543,12 +543,13 @@ if __name__ == "__main__":
     
             # ------------------ One cheap synth pass for question rationales ------
             def synth_reasons_batch(world_summaries, mc_questions, meta_by_q, forecasts, n_worlds, llm_call):
-                # limit token use
-                subset = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
+                # limit token use, use a max number of summaries
+                import random
+                K = min(20, len(world_summaries))  # pick your K
+                subset = random.sample(world_summaries, K) if world_summaries else []
                 if not subset:
-                    # fallback: at least one minimal “world” so the model must pick concrete drivers
-                    subset = ["A baseline world with no major recent shocks; outcomes primarily depend on the question’s own mechanisms and usual constraints."]
-
+                    raise RuntimeError("No world summaries available for rationale synthesis.")
+                                    
                 def _one_line(text: str) -> str:
                     return text.replace("\n", " ").replace("\r", " ").strip()
                 summaries_block = "\n".join("- " + _one_line(s) for s in subset)
