@@ -222,27 +222,41 @@ def run_mc_worlds(
     n_worlds: int = 3,
     batch_size: int = 12,
     return_evidence: bool = False,
-) -> Dict[str, Dict[str, Any]]:
-    """Batch questions, sample n_worlds per batch, print, and return forecasts keyed by REAL qid."""
+) -> Dict[str, Dict[str, Any]] | tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """
+    Batch questions, sample n_worlds per batch, print progress,
+    and return forecasts keyed by REAL qid.
+    If return_evidence=True, also return per-qid evidence buckets.
+    """
     results: Dict[str, Dict[str, Any]] = {}
+    evidence_by_q: Dict[str, Any] = {}  # <-- moved outside the loop to accumulate across batches
+
+    total_attempted = 0
+    total_success  = 0
+
     for i in range(0, len(open_questions), batch_size):
-        evidence_by_q = {}  # merged across batches
         batch = open_questions[i:i + batch_size]
         id2key, key2id, key_specs = _make_keymaps(batch)
         digest = build_batch_digest(batch, research_by_q, id2key, key_specs)
         print("[MC] DIGEST START\n" + digest["facts"] + "\n[MC] DIGEST END")
+
         worlds = []
         for j in range(n_worlds):
+            total_attempted += 1
             try:
                 worlds.append(sample_one_world(llm_call, digest))
+                total_success += 1
             except Exception as e:
                 print(f"[MC][WARN] world {j+1}/{n_worlds} failed: {e}")
 
         forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
+
+        # collect + merge evidence for this batch
         ev = extract_evidence(worlds, key2id)
-        # merge into evidence_by_q
         for qid, buckets in ev.items():
-            dst = evidence_by_q.setdefault(qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []})
+            dst = evidence_by_q.setdefault(
+                qid, {"binary_yes": [], "binary_no": [], "mc": {}, "numeric": [], "date": []}
+            )
             dst["binary_yes"].extend(buckets["binary_yes"])
             dst["binary_no"].extend(buckets["binary_no"])
             for opt, arr in buckets["mc"].items():
@@ -256,6 +270,8 @@ def run_mc_worlds(
             if qid in forecasts:
                 print(f"[MC] {id2key[qid]} -> {forecasts[qid]}")
                 results[qid] = forecasts[qid]
-    print(f"[MC] TOTAL scenario calls: {sum(1 for _ in range(0, len(open_questions), batch_size)) * n_worlds}")
+
+    print(f"[MC] TOTAL scenarios: {total_success}/{total_attempted} successful")
     return (results, evidence_by_q) if return_evidence else results
+
 
