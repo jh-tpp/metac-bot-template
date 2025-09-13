@@ -31,76 +31,6 @@ from mc_worlds import build_batch_digest, sample_one_world, aggregate_worlds, ma
 class FallTemplateBot2025(ForecastBot):
     """
     This is a copy of the template bot for Fall 2025 Metaculus AI Tournament.
-    This bot is what is used by Metaculus in our benchmark, but is also provided as a template for new bot makers.
-    This template is given as-is, and though we have covered most test cases
-    in forecasting-tools it may be worth double checking key components locally.
-
-    Main changes since Q2:
-    - An LLM now parses the final forecast output (rather than programmatic parsing)
-    - Added resolution criteria and fine print explicitly to the research prompt
-    - Previously in the prompt, nothing about upper/lower bound was shown when the bounds were open. Now a suggestion is made when this is the case.
-    - Support for nominal bounds was added (i.e. when there are discrete questions and normal upper/lower bounds are not as intuitive)
-
-    The main entry point of this bot is `forecast_on_tournament` in the parent class.
-    See the script at the bottom of the file for more details on how to run the bot.
-    Ignoring the finer details, the general flow is:
-    - Load questions from Metaculus
-    - For each question
-        - Execute run_research a number of times equal to research_reports_per_question
-        - Execute respective run_forecast function `predictions_per_research_report * research_reports_per_question` times
-        - Aggregate the predictions
-        - Submit prediction (if publish_reports_to_metaculus is True)
-    - Return a list of ForecastReport objects
-
-    Only the research and forecast functions need to be implemented in ForecastBot subclasses,
-    though you may want to override other ones.
-    In this example, you can change the prompts to be whatever you want since,
-    structure_output uses an LLMto intelligently reformat the output into the needed structure.
-
-    By default (i.e. 'tournament' mode), when you run this script, it will forecast on any open questions for the
-    MiniBench and Seasonal AIB tournaments. If you want to forecast on only one or the other, you can remove one
-    of them from the 'tournament' mode code at the bottom of the file.
-
-    You can experiment with what models work best with your bot by using the `llms` parameter when initializing the bot.
-    You can initialize the bot with any number of models. For example,
-    ```python
-    my_bot = MyBot(
-        ...
-        llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-            "default": GeneralLlm(
-                model="openrouter/openai/gpt-4o", # "anthropic/claude-3-5-sonnet-20241022", etc (see docs for litellm)
-                temperature=0.3,
-                timeout=40,
-                allowed_tries=2,
-            ),
-            "summarizer": "openai/gpt-4o-mini",
-            "researcher": "asknews/deep-research/low",
-            "parser": "openai/gpt-4o-mini",
-        },
-    )
-    ```
-
-    Then you can access the model in custom functions like this:
-    ```python
-    research_strategy = self.get_llm("researcher", "model_name"
-    if research_strategy == "asknews/deep-research/low":
-        ...
-    # OR
-    summarizer = await self.get_llm("summarizer", "model_name").invoke(prompt)
-    # OR
-    reasoning = await self.get_llm("default", "llm").invoke(prompt)
-    ```
-
-    If you end up having trouble with rate limits and want to try a more sophisticated rate limiter try:
-    ```python
-    from forecasting_tools import RefreshingBucketRateLimiter
-    rate_limiter = RefreshingBucketRateLimiter(
-        capacity=2,
-        refresh_rate=1,
-    ) # Allows 1 request per second on average with a burst of 2 requests initially. Set this as a class variable
-    await self.rate_limiter.wait_till_able_to_acquire_resources(1) # 1 because it's consuming 1 request (use more if you are adding a token limit)
-    ```
-    Additionally OpenRouter has large rate limits immediately on account creation
     """
 
     _max_concurrent_questions = (
@@ -464,6 +394,8 @@ if __name__ == "__main__":
         def qid_from_url(u: str) -> str:
             import re
             m = re.search(r"/questions/(\d+)(?:/|$)", u)
+            if not m:
+                raise SystemExit(f"Could not parse qid from URL: {u}")
             return m.group(1)
         
         def mc_option_count(q_obj) -> int | None:
@@ -497,30 +429,14 @@ if __name__ == "__main__":
         questions = [MetaculusApi.get_question_by_url(u) for (u, _) in EXAMPLES]
     
         # 3) Parse qids from URLs
-        import re
-        def qid_from_url(u: str) -> str:
-            m = re.search(r"/questions/(\d+)(?:/|$)", u)
-            if not m:
-                raise SystemExit(f"Could not parse qid from URL: {u}")
-            return m.group(1)
-        
-        def qid_from_url(u: str) -> str:
-            import re
-            m = re.search(r"/questions/(\d+)(?:/|$)", u)
-            if not m:
-                raise SystemExit(f"Could not parse qid from URL: {u}")
-            return m.group(1)
-        
         def qtitle(q_obj) -> str:
             for attr in ("title", "name", "question_title"):
                 v = getattr(q_obj, attr, None)
-                if v:
-                    return str(v)
+                if v: return str(v)
             try:
                 d = q_obj.model_dump()
                 for k in ("title", "name", "question_title"):
-                    if d.get(k):
-                        return str(d[k])
+                    if d.get(k): return str(d[k])
             except Exception:
                 pass
             return ""
@@ -542,19 +458,24 @@ if __name__ == "__main__":
             return None
         
         mc_questions = []
+        meta_by_q = {}
         for (u, t), obj in zip(EXAMPLES, questions):
-            entry = {"id": qid_from_url(u), "type": t, "title": qtitle(obj)}
+            qid = qid_from_url(u)
+            title = qtitle(obj)
+            entry = {"id": qid, "type": t, "title": title}
+            md = {"title": title}
             if t == "multiple_choice":
                 opts = mc_options_text(obj)
-                if opts:
-                    entry["options"] = opts
-                    entry["k"] = len(opts)
+                entry["options"] = opts
+                entry["k"] = len(opts) if opts else None
+                md["options"] = opts
+            meta_by_q[qid] = md
             mc_questions.append(entry)
         
         # Minimal neutral facts; do NOT mention “sampler” or prompts.
         from datetime import date
         today = date.today().isoformat()
-        research_by_q = {q["id"]: [f"{today}: no notable updates; rely on question text and base rates"]
+        research_by_q = {q["id"]: [f"{today}: no notable updates; use question text and base rates"]
                          for q in mc_questions}
     
         # 5) number of draws
@@ -628,7 +549,7 @@ if __name__ == "__main__":
         import json
 
         try:
-            mc_results, mc_evidence = run_mc_worlds(
+            mc_results, world_summaries = run_mc_worlds(
                 open_questions=mc_questions,
                 research_by_q=research_by_q,
                 llm_call=llm_call,
@@ -636,6 +557,70 @@ if __name__ == "__main__":
                 batch_size=12,
                 return_evidence=True,
             )
+
+            def synth_reasons_batch(world_summaries, mc_questions, meta_by_q, forecasts, n_worlds, llm_call):
+                """
+                One LLM call that returns per-qid bullets from shared world_summaries.
+                """
+                # Keep token usage sane: take first 12 summaries (or sample).
+                sample = world_summaries[:12] if len(world_summaries) > 12 else world_summaries
+                summaries_block = "\n\n".join(f"- {s.replace('\n', ' ').strip()}" for s in sample)
+            
+                # Build compact question list with forecast extracts
+                qlines = []
+                for q in mc_questions:
+                    qid, qtype = q["id"], q["type"]
+                    title = meta_by_q[qid]["title"]
+                    line = {"qid": qid, "type": qtype, "title": title}
+                    f = forecasts.get(qid, {})
+                    if qtype == "binary":
+                        p = f.get("binary", {}).get("p")
+                        line["forecast"] = {"p_yes": p}
+                    elif qtype == "multiple_choice":
+                        probs = f.get("multiple_choice", {}).get("probs", [])
+                        if probs:
+                            top = max(range(len(probs)), key=lambda i: probs[i])
+                            name = (q.get("options", [])[top] if 0 <= top < len(q.get("options", [])) else f"option {top}")
+                            line["forecast"] = {"top_index": top, "top_name": name, "top_p": probs[top], "k": len(probs)}
+                        else:
+                            line["forecast"] = {"top_index": 0, "top_name": "unknown", "top_p": 0.0, "k": q.get("k")}
+                    elif qtype == "numeric":
+                        grid = f.get("numeric", {}).get("grid", [])
+                        cdf  = f.get("numeric", {}).get("cdf", [])
+                        def pct(x):
+                            return next((vx for vx, y in zip(grid, cdf) if y >= x), grid[-1] if grid else None)
+                        if grid and cdf:
+                            line["forecast"] = {"median": pct(0.5), "p10": pct(0.1), "p90": pct(0.9)}
+                    qlines.append(line)
+            
+                import json as _json
+                prompt = (
+                    "You will write short, question-specific rationales using the sampled world summaries.\n"
+                    "Constraints:\n"
+                    "- Address EACH question separately; no generic bullets shared across questions.\n"
+                    "- Use concrete drivers implied by the summaries; no meta (no prompts/JSON/samplers).\n"
+                    "- Output JSON ONLY as {\"reasons\": {qid: [\"b1\",\"b2\",\"b3\"], ...}}.\n\n"
+                    "SAMPLED WORLD SUMMARIES (representative subset):\n"
+                    f"{summaries_block}\n\n"
+                    "QUESTIONS WITH CURRENT FORECASTS:\n"
+                    f"{_json.dumps(qlines, ensure_ascii=False)}"
+                )
+            
+                resp = llm_call(prompt)
+                try:
+                    obj = _json.loads(resp)
+                    reasons = obj.get("reasons", {})
+                    # sanitize
+                    clean = {}
+                    for qid, arr in reasons.items():
+                        if not isinstance(arr, list): continue
+                        bullets = [str(b).strip().lstrip("• ").strip() for b in arr if str(b).strip()]
+                        if bullets:
+                            clean[qid] = bullets[:3]
+                    return clean
+                except Exception:
+                    return {}
+
 
             def _clip(s: str, n: int = 160) -> str:
                 s = (s or "").strip().replace("\n", " ")
@@ -724,32 +709,21 @@ if __name__ == "__main__":
                 if qtype == "binary":
                     p = forecast["binary"]["p"]
                     return (
-                        f"Method: {n_worlds} scenario draws; p = {p:.2f} from empirical frequency.\n"
-                        f"Context: dated fact digest; conservative when uncertain.\n"
-                        f"Updates: will adjust on major news."
                     )
                 if qtype == "multiple_choice":
                     probs = forecast["multiple_choice"]["probs"]
                     top = max(range(len(probs)), key=lambda i: probs[i]) if probs else 0
                     return (
-                        f"Method: {n_worlds} draws; option probs from empirical frequency.\n"
-                        f"Top option: {top} @ {probs[top]:.2f}; vector (truncated): {probs[:5]}.\n"
-                        f"Updates: will adjust on major news."
                     )
                 if qtype == "numeric":
                     grid, cdf = forecast["numeric"]["grid"], forecast["numeric"]["cdf"]
                     med = _median_from_cdf(grid, cdf)
                     p10, p90 = _p10_p90_from_cdf(grid, cdf)
                     return (
-                        f"Method: {n_worlds} draws; ECDF → CDF on a test grid.\n"
-                        f"Median ≈ {med:.2f}; 10–90% ≈ [{p10:.2f}, {p90:.2f}].\n"
-                        f"Updates: will adjust on major news."
                     )
                 if qtype == "date":
                     # If you return {"date":{"grid_ord":[...],"cdf":[...]}} in tests
                     return (
-                        f"Method: {n_worlds} draws; ECDF on ordinal-date grid.\n"
-                        f"Updates: will adjust on major news."
                     )
                 return "Method: scenario draws; empirical aggregation."
         
@@ -774,6 +748,27 @@ if __name__ == "__main__":
                     for qid_i, txt in reasons.items():
                         f.write(f"Q{qid_i}\n{txt}\n\n")
                 print("[MC] wrote mc_reasons.txt")
+
+            reason_map = synth_reasons_batch(world_summaries, mc_questions, meta_by_q, mc_results, N_WORLDS, llm_call)
+
+            with open("mc_reasons.txt", "w") as f:
+                for q in mc_questions:
+                    qid = q["id"]
+                    bullets = reason_map.get(qid, [])
+                    if bullets:
+                        txt = "• " + "\n• ".join(bullets)
+                    else:
+                        txt = "• Base rates and signals from sampled worlds; insufficient question-specific detail."
+                    print(f"[MC][REASON] Q{qid}:\n{txt}\n")
+                    f.write(f"Q{qid}\n{txt}\n\n")
+            
+            with open("mc_results.json", "w") as f:
+                import json
+                json.dump(mc_results, f, indent=2)
+            print("[MC] wrote mc_results.json")
+            print("[MC] wrote mc_reasons.txt")
+            print("[MC] SENTINEL: end of test batch.")
+            raise SystemExit(0)
 
             print("[MC] SENTINEL: end of test batch.")
             raise SystemExit(0)
