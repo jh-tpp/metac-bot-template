@@ -25,6 +25,23 @@ from forecasting_tools import (
 
 logger = logging.getLogger(__name__)
 
+# main.py (excerpt)
+from keying import make_keymaps
+from mc_worlds import build_batch_digest, sample_one_world, aggregate_worlds, make_comment
+
+def run_mc_worlds(open_questions, research_by_q, llm_call, n_worlds=50, batch_size=12):
+    for i in range(0, len(open_questions), batch_size):
+        batch = open_questions[i:i+batch_size]
+        id2key, key2id, key_specs = make_keymaps(batch)
+        digest = build_batch_digest(batch, research_by_q, id2key, key_specs)
+        worlds = [sample_one_world(llm_call, digest) for _ in range(n_worlds)]
+        forecasts = aggregate_worlds(batch, worlds, key2id, key_specs)
+        print(f"[MC] Batch {i//batch_size+1}: {len(worlds)} worlds")
+        for q in batch:
+            qid = str(q["id"])
+            if qid in forecasts:
+                print(f"[MC] Q{ id2key[qid] } -> {forecasts[qid]}")
+        # Later: convert forecasts[qid] to the template’s expected API shape and submit
 
 class FallTemplateBot2025(ForecastBot):
     """
