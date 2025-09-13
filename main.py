@@ -461,7 +461,29 @@ if __name__ == "__main__":
         )
     elif run_mode == "test_questions":
         print(f"RUN_MODE = {run_mode}")
-    
+
+        def qid_from_url(u: str) -> str:
+            import re
+            m = re.search(r"/questions/(\d+)(?:/|$)", u)
+            return m.group(1)
+        
+        def mc_option_count(q_obj) -> int | None:
+            # Try attributes
+            for attr in ("options", "choices", "answer_options", "options_text"):
+                v = getattr(q_obj, attr, None)
+                if isinstance(v, list):
+                    return len(v)
+            # Try pydantic dump
+            try:
+                d = q_obj.model_dump()
+                for k in ("options", "choices", "answer_options", "options_text"):
+                    v = d.get(k)
+                    if isinstance(v, list):
+                        return len(v)
+            except Exception:
+                pass
+            return None
+            
         # 1) Use one known-binary test question
         # TEST_URL = "https://www.metaculus.com/questions/578/human-extinction-by-2100/"
         # EXAMPLE_QUESTIONS = [TEST_URL]
@@ -483,7 +505,14 @@ if __name__ == "__main__":
                 raise SystemExit(f"Could not parse qid from URL: {u}")
             return m.group(1)
         
-        mc_questions = [{"id": qid_from_url(u), "type": t} for (u, t) in EXAMPLES]
+        mc_questions = []
+        for (u, t), obj in zip(EXAMPLES, questions):
+            entry = {"id": qid_from_url(u), "type": t}
+            if t == "multiple_choice":
+                k = mc_option_count(obj)
+                if k:
+                    entry["k"] = k
+            mc_questions.append(entry)
         
         # 4) Minimal facts (1 line each is fine for now)
         research_by_q = {
@@ -507,7 +536,7 @@ if __name__ == "__main__":
                     {"role": "system", "content": "Reply with a single valid JSON object. No preface, no code fences."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.7,
+                "temperature": 1.0,
                 # JSON mode is supported on gpt-4o-mini; keep it on
                 "response_format": {"type": "json_object"},
             }
@@ -615,7 +644,19 @@ if __name__ == "__main__":
                 if not fore_i:
                     continue
                 print(f"[MC][REASON] Q{qid_i}:\n{build_reasoning(qtype_i, fore_i, N_WORLDS)}")
-        
+                reasons = {}
+                for q in mc_questions:
+                    qid_i, qtype_i = q["id"], q["type"]
+                    fore_i = mc_results.get(qid_i)
+                    if not fore_i:
+                        continue
+                    reasons[qid_i] = build_reasoning(qtype_i, fore_i, N_WORLDS)
+                
+                with open("mc_reasons.txt", "w") as f:
+                    for qid_i, txt in reasons.items():
+                        f.write(f"Q{qid_i}\n{txt}\n\n")
+                print("[MC] wrote mc_reasons.txt")
+
             print("[MC] SENTINEL: end of test batch.")
             raise SystemExit(0)
         
