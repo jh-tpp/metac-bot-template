@@ -3,7 +3,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Literal, List, Dict
 
 from forecasting_tools import (
     AskNewsSearcher,
@@ -302,6 +302,42 @@ class FallTemplateBot2025(ForecastBot):
             )
         return upper_bound_message, lower_bound_message
 
+# ---- AskNews -> dated bullets for MC sampler ----
+    async def _asknews_bullets_async(qid_to_text: Dict[str, str]) -> Dict[str, List[str]]:
+        """
+        For each qid, fetch a compact 'latest' news summary and convert it into
+        dated bullet strings the MC prompt expects. Returns: {qid: [YYYY-MM-DD: fact, ...]}
+        """
+        searcher = AskNewsSearcher()
+        out: Dict[str, List[str]] = {}
+        from datetime import date
+        today = date.today().isoformat()
+
+    async def _one(qid: str, question_text: str) -> None:
+        # You can swap between news summaries (fast) and deep research (heavier)
+        # 1) fast:
+        text = await searcher.get_formatted_news_async(question_text)
+        # 2) deeper (comment the fast one and uncomment this if you want more detail):
+        # text = await searcher.get_formatted_deep_research(
+        #     question_text, sources=["asknews", "google"], search_depth=2, max_depth=4
+        # )
+        # Convert any lines into short dated facts. Keep the first ~5.
+        bullets = []
+        for raw in (text or "").splitlines():
+            s = raw.strip(" -•\t").strip()
+            if not s:
+                continue
+            # make each a dated compact fact. We don't rely on AskNews having dates inline.
+            bullets.append(f"{today}: {s}")
+            if len(bullets) == 5:
+                break
+        # fallback if AskNews returned nothing useful
+        if not bullets:
+            bullets = [f"{today}: no notable updates; use question text and base rates"]
+        out[qid] = bullets
+
+    await asyncio.gather(*[_one(qid, qtxt) for qid, qtxt in qid_to_text.items()])
+    return out
 
 if __name__ == "__main__":
     logging.basicConfig(
