@@ -1,8 +1,8 @@
 import argparse
 import asyncio
 import logging
-import json
-from datetime import datetime
+import os, json
+from datetime import date, datetime, timedelta
 from typing import Literal, List, Dict
 
 from forecasting_tools import (
@@ -339,6 +339,71 @@ class FallTemplateBot2025(ForecastBot):
     await asyncio.gather(*[_one(qid, qtxt) for qid, qtxt in qid_to_text.items()])
     return out
 
+# ---------- AskNews cache (lightweight) ----------
+    ASKNEWS_CACHE_PATH = ".cache/asknews.json"
+    
+    def _load_asknews_cache() -> Dict[str, dict]:
+        try:
+            os.makedirs(os.path.dirname(ASKNEWS_CACHE_PATH), exist_ok=True)
+            if os.path.exists(ASKNEWS_CACHE_PATH):
+                with open(ASKNEWS_CACHE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+    
+    def _save_asknews_cache(cache: Dict[str, dict]) -> None:
+        try:
+            os.makedirs(os.path.dirname(ASKNEWS_CACHE_PATH), exist_ok=True)
+            with open(ASKNEWS_CACHE_PATH, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    
+    async def asknews_bullets_cached(
+        qid_to_text: Dict[str, str],
+        stale_days: int = 3,
+        max_bullets: int = 5,
+        force_refresh: bool = False,
+    ) -> Dict[str, List[str]]:
+        """
+        Returns {qid: [YYYY-MM-DD: fact, ...]} using AskNews only when (a) missing or (b) stale.
+        """
+        cache = _load_asknews_cache()
+        need_fetch: Dict[str, str] = {}
+        out: Dict[str, List[str]] = {}
+        today = date.today()
+        cutoff = today - timedelta(days=stale_days)
+    
+        for qid, qtxt in qid_to_text.items():
+            item = cache.get(qid)
+            if not force_refresh and item:
+                try:
+                    fetched = date.fromisoformat(item["fetched_at"])
+                except Exception:
+                    fetched = cutoff - timedelta(days=1)
+                if fetched >= cutoff and item.get("bullets"):
+                    out[qid] = item["bullets"][:max_bullets]
+                    continue
+            need_fetch[qid] = qtxt
+    
+        fetched_count = 0
+        if need_fetch:
+            fresh = await _asknews_bullets_async(need_fetch)  # <- your existing async fetcher
+            for qid, bullets in fresh.items():
+                cache[qid] = {
+                    "fetched_at": today.isoformat(),
+                    "bullets": bullets[:max_bullets],
+                }
+                out[qid] = bullets[:max_bullets]
+                fetched_count += 1
+            _save_asknews_cache(cache)
+    
+        hits = len(qid_to_text) - fetched_count
+        print(f"[ASKNEWS] fetched {fetched_count}, cache hits {hits}, stale_days={stale_days}, force={force_refresh}")
+        return out
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -491,11 +556,9 @@ if __name__ == "__main__":
             mc_questions.append(entry)
             meta_by_q[qid] = meta
     
-        # ---------------------- AskNews facts per question -----------------------
-        # Build a map {qid -> full question text} using the objects we resolved earlier.
+        # ---------------------- AskNews facts per question (cached) -----------------------
         qid_to_text = {}
         for (u, _t), obj in zip(EXAMPLES, questions):
-            # We already have a helper to get titles; here we need the full question text
             qid = qid_from_url(u)
             qtxt = getattr(obj, "question_text", None) or ""
             if not qtxt:
@@ -504,20 +567,22 @@ if __name__ == "__main__":
                     qtxt = d.get("question_text", "") or d.get("title", "")
                 except Exception:
                     pass
-            qid_to_text[qid] = qtxt or ""  # empty ok (AskNews prompt still works)
+            qid_to_text[qid] = qtxt or ""
         
-        # Run AskNews (async) to get dated, compact bullets per qid
+        # knobs via env vars (optional)
+        import os
+        STALE_DAYS = int(os.getenv("ASKNEWS_STALE_DAYS", "3"))
+        FORCE_REFRESH = os.getenv("ASKNEWS_FORCE_REFRESH", "false").lower() == "true"
+        MAX_BULLETS = int(os.getenv("ASKNEWS_MAX_BULLETS", "5"))
+        
         try:
-            research_by_q = asyncio.run(_asknews_bullets_async(qid_to_text))
+            research_by_q = asyncio.run(
+                asknews_bullets_cached(qid_to_text, stale_days=STALE_DAYS, max_bullets=MAX_BULLETS, force_refresh=FORCE_REFRESH)
+            )
         except Exception as e:
             print(f"[MC][ASKNEWS] fallback (error: {e}) — using neutral base-rate bullets")
-            from datetime import date
             today = date.today().isoformat()
-            research_by_q = {
-                q["id"]: [f"{today}: no notable updates; use question text and base rates"]
-                for q in mc_questions
-            }
-
+            research_by_q = {q["id"]: [f"{today}: no notable updates; use question text and base rates"] for q in mc_questions}
 
     
         # ---------------------- World sampling config ----------------------------
