@@ -491,13 +491,34 @@ if __name__ == "__main__":
             mc_questions.append(entry)
             meta_by_q[qid] = meta
     
-        # ---------------------- Neutral “facts” per question ---------------------
-        from datetime import date
-        today = date.today().isoformat()
-        research_by_q = {
-            q["id"]: [f"{today}: no notable updates; use question text and base rates"]
-            for q in mc_questions
-        }
+        # ---------------------- AskNews facts per question -----------------------
+        # Build a map {qid -> full question text} using the objects we resolved earlier.
+        qid_to_text = {}
+        for (u, _t), obj in zip(EXAMPLES, questions):
+            # We already have a helper to get titles; here we need the full question text
+            qid = qid_from_url(u)
+            qtxt = getattr(obj, "question_text", None) or ""
+            if not qtxt:
+                try:
+                    d = obj.model_dump()
+                    qtxt = d.get("question_text", "") or d.get("title", "")
+                except Exception:
+                    pass
+            qid_to_text[qid] = qtxt or ""  # empty ok (AskNews prompt still works)
+        
+        # Run AskNews (async) to get dated, compact bullets per qid
+        try:
+            research_by_q = asyncio.run(_asknews_bullets_async(qid_to_text))
+        except Exception as e:
+            print(f"[MC][ASKNEWS] fallback (error: {e}) — using neutral base-rate bullets")
+            from datetime import date
+            today = date.today().isoformat()
+            research_by_q = {
+                q["id"]: [f"{today}: no notable updates; use question text and base rates"]
+                for q in mc_questions
+            }
+
+
     
         # ---------------------- World sampling config ----------------------------
         N_WORLDS = 30
