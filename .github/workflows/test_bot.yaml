@@ -33,6 +33,11 @@ jobs:
       #   with:
       #     path: .venv
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+      - name: Restore AskNews cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/asknews.json
+          key: asknews-cache-v1
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
       - name: Verify deps are in Poetry venv
