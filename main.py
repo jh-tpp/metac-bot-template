@@ -19,7 +19,7 @@ CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "openrouter/openai/gpt-4o-mini"
+OPENROUTER_MODEL = "openai/gpt-4o-mini"
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
@@ -105,14 +105,17 @@ def _get_asknews_token():
         print("[WARN] ASKNEWS_CLIENT_ID/ASKNEWS_SECRET not set")
         return None
     try:
-        token_url = "https://api.asknews.app/v1/oauth/token"
+        token_url = "https://auth.asknews.app/oauth2/token"
         data = {
             "client_id": ASKNEWS_CLIENT_ID,
             "client_secret": ASKNEWS_SECRET,
             "grant_type": "client_credentials",
             "scope": "news"
         }
-        resp = requests.post(token_url, data=data, timeout=10)
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        resp = requests.post(token_url, data=data, headers=headers, timeout=10)
         resp.raise_for_status()
         body = resp.json()
         token = body.get("access_token")
