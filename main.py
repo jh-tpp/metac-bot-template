@@ -328,6 +328,70 @@ def parse_numeric_bounds(question_obj):
     
     return None
 
+def correct_numeric_bounds(result, bounds):
+    """
+    Attempt to correct numeric result to fit within bounds.
+    
+    Args:
+        result: dict with grid, cdf, p10, p50, p90
+        bounds: (min_bound, max_bound) tuple
+    
+    Returns:
+        (corrected_result, success) tuple
+    """
+    if not bounds:
+        return result, True
+    
+    min_bound, max_bound = bounds
+    grid = result.get("grid", [])
+    cdf = result.get("cdf", [])
+    
+    if not grid or not cdf:
+        return result, False
+    
+    # Check if correction is needed
+    needs_correction = False
+    if min(grid) < min_bound or max(grid) > max_bound:
+        needs_correction = True
+    
+    for pname in ["p10", "p50", "p90"]:
+        pval = result.get(pname)
+        if pval is not None and (pval < min_bound or pval > max_bound):
+            needs_correction = True
+    
+    if not needs_correction:
+        return result, True
+    
+    # Attempt correction: clamp grid and percentiles
+    print(f"[INFO] Attempting bounded correction: clamping to [{min_bound}, {max_bound}]")
+    
+    corrected = result.copy()
+    
+    # Clamp grid
+    corrected["grid"] = [max(min_bound, min(max_bound, x)) for x in grid]
+    
+    # Re-check CDF monotonicity (may be affected by clamping)
+    # If grid values collapsed, we need to deduplicate and rebuild CDF
+    unique_grid = []
+    unique_cdf = []
+    for i, x in enumerate(corrected["grid"]):
+        if not unique_grid or x > unique_grid[-1]:
+            unique_grid.append(x)
+            unique_cdf.append(cdf[i])
+        elif x == unique_grid[-1]:
+            # Update CDF to max if duplicate grid point
+            unique_cdf[-1] = max(unique_cdf[-1], cdf[i])
+    
+    corrected["grid"] = unique_grid
+    corrected["cdf"] = unique_cdf
+    
+    # Clamp percentiles
+    for pname in ["p10", "p50", "p90"]:
+        if pname in corrected:
+            corrected[pname] = max(min_bound, min(max_bound, corrected[pname]))
+    
+    return corrected, True
+
 # ========== Validation ==========
 def validate_mc_result(question_obj, result):
     """
@@ -428,8 +492,30 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     
     valid, err = validate_mc_result(question_obj, mc_result)
     if not valid:
-        print(f"[ERROR] Validation failed for Q{qid}: {err}")
-        return False
+        # For numeric questions with bounds, try correction
+        qtype = question_obj.get("type", "").lower()
+        if "numeric" in qtype or "continuous" in qtype:
+            bounds = parse_numeric_bounds(question_obj)
+            if bounds:
+                print(f"[WARN] Initial validation failed for Q{qid}: {err}")
+                mc_result, success = correct_numeric_bounds(mc_result, bounds)
+                if success:
+                    # Re-validate after correction
+                    valid, err = validate_mc_result(question_obj, mc_result)
+                    if valid:
+                        print(f"[INFO] Correction successful for Q{qid}")
+                    else:
+                        print(f"[ERROR] Correction failed for Q{qid}: {err}")
+                        return False
+                else:
+                    print(f"[ERROR] Could not correct Q{qid}")
+                    return False
+            else:
+                print(f"[ERROR] Validation failed for Q{qid}: {err}")
+                return False
+        else:
+            print(f"[ERROR] Validation failed for Q{qid}: {err}")
+            return False
     
     payload = mc_results_to_metaculus_payload(question_obj, mc_result)
     
