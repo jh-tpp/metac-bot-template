@@ -1,24 +1,36 @@
 name: Check OpenRouter Credits
 
 on:
-  workflow_dispatch: {}
-  # schedule:
-  #   - cron: "0 7 * * *"   # optional daily run at 07:00 UTC
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"  # daily at 08:17 UTC
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      - name: Ensure jq is available
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Query credits JSON
         id: credits
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
-          RESP="$(curl -sS https://openrouter.ai/api/v1/credits \
+          # Call API and capture body + status code
+          RESP="$(curl -sS -w '\n%{http_code}' https://openrouter.ai/api/v1/credits \
             -H "Authorization: Bearer $OPENROUTER_API_KEY")"
 
-          echo "$RESP" > credits.json
+          HTTP_CODE="$(echo "$RESP" | tail -n1)"
+          BODY="$(echo "$RESP" | sed '$d')"
+          echo "$BODY" > credits.json
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "API error (status $HTTP_CODE):"
+            cat credits.json
+            exit 1
+          fi
 
           TOTAL_CREDITS=$(jq -r '.data.total_credits // 0' credits.json)
           TOTAL_USAGE=$(jq -r '.data.total_usage // 0' credits.json)
@@ -26,16 +38,24 @@ jobs:
 
           echo "total_credits=$TOTAL_CREDITS" >> "$GITHUB_OUTPUT"
           echo "total_usage=$TOTAL_USAGE"     >> "$GITHUB_OUTPUT"
-          echo "remaining=$REMaining"         >> "$GITHUB_OUTPUT"
+          echo "remaining=$REMAINING"         >> "$GITHUB_OUTPUT"
 
           echo "TOTAL_CREDITS: $TOTAL_CREDITS"
           echo "TOTAL_USAGE:   $TOTAL_USAGE"
           echo "REMAINING:     $REMAINING"
 
-      - name: Show summary
+      - name: Upload raw JSON (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openrouter-credits
+          path: credits.json
+
+      - name: Summary
         run: |
-          echo "### OpenRouter Credits" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Total credits | Total usage | Remaining |" >> $GITHUB_STEP_SUMMARY
-          echo "|---:|---:|---:|" >> $GITHUB_STEP_SUMMARY
-          echo "| ${{ steps.credits.outputs.total_credits }} | ${{ steps.credits.outputs.total_usage }} | ${{ steps.credits.outputs.remaining }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### OpenRouter Credits"
+            echo ""
+            echo "| Total credits | Total usage | Remaining |"
+            echo "|---:|---:|---:|"
+            echo "| ${{ steps.credits.outputs.total_credits }} | ${{ steps.credits.outputs.total_usage }} | ${{ steps.credits.outputs.remaining }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
