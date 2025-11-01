@@ -289,6 +289,109 @@ def synthesize_rationale(question_text, world_summaries, aggregate_forecast, max
         print(f"[ERROR] Rationale synthesis failed: {e}")
         return ["Could not synthesize rationale due to LLM error."]
 
+# ========== Numeric Bounds Parser ==========
+def parse_numeric_bounds(question_obj):
+    """
+    Parse numeric bounds from question metadata or description.
+    
+    Args:
+        question_obj: Metaculus question dict
+    
+    Returns:
+        (min_val, max_val) tuple or None if not found
+    """
+    # First try question metadata
+    if "min" in question_obj and "max" in question_obj:
+        try:
+            min_val = float(question_obj["min"])
+            max_val = float(question_obj["max"])
+            return (min_val, max_val)
+        except (ValueError, TypeError):
+            pass
+    
+    # Fallback to regex parsing of description
+    import re
+    desc = question_obj.get("description", "")
+    if not desc:
+        return None
+    
+    # Pattern: "Range: <min> to <max>" (handles negatives and decimals)
+    pattern = r'Range:\s*([-+]?\d+(?:\.\d+)?)\s*to\s*([-+]?\d+(?:\.\d+)?)'
+    match = re.search(pattern, desc, re.IGNORECASE)
+    if match:
+        try:
+            min_val = float(match.group(1))
+            max_val = float(match.group(2))
+            return (min_val, max_val)
+        except (ValueError, TypeError):
+            pass
+    
+    return None
+
+def correct_numeric_bounds(result, bounds):
+    """
+    Attempt to correct numeric result to fit within bounds.
+    
+    Args:
+        result: dict with grid, cdf, p10, p50, p90
+        bounds: (min_bound, max_bound) tuple
+    
+    Returns:
+        (corrected_result, success) tuple
+    """
+    if not bounds:
+        return result, True
+    
+    min_bound, max_bound = bounds
+    grid = result.get("grid", [])
+    cdf = result.get("cdf", [])
+    
+    if not grid or not cdf:
+        return result, False
+    
+    # Check if correction is needed
+    needs_correction = False
+    if min(grid) < min_bound or max(grid) > max_bound:
+        needs_correction = True
+    
+    for pname in ["p10", "p50", "p90"]:
+        pval = result.get(pname)
+        if pval is not None and (pval < min_bound or pval > max_bound):
+            needs_correction = True
+    
+    if not needs_correction:
+        return result, True
+    
+    # Attempt correction: clamp grid and percentiles
+    print(f"[INFO] Attempting bounded correction: clamping to [{min_bound}, {max_bound}]")
+    
+    corrected = result.copy()
+    
+    # Clamp grid
+    corrected["grid"] = [max(min_bound, min(max_bound, x)) for x in grid]
+    
+    # Re-check CDF monotonicity (may be affected by clamping)
+    # If grid values collapsed, we need to deduplicate and rebuild CDF
+    unique_grid = []
+    unique_cdf = []
+    for i, x in enumerate(corrected["grid"]):
+        if not unique_grid or x > unique_grid[-1]:
+            unique_grid.append(x)
+            unique_cdf.append(cdf[i])
+        elif x == unique_grid[-1]:
+            # Update CDF to max if duplicate grid point
+            unique_cdf[-1] = max(unique_cdf[-1], cdf[i])
+    
+    corrected["grid"] = unique_grid
+    corrected["cdf"] = unique_cdf
+    
+    # Clamp percentiles
+    for pname in ["p10", "p50", "p90"]:
+        if pname in corrected:
+            corrected[pname] = max(min_bound, min(max_bound, corrected[pname]))
+    
+    return corrected, True
+
 # ========== Validation ==========
 def validate_mc_result(question_obj, result):
     """
@@ -341,6 +444,26 @@ def validate_mc_result(question_obj, result):
         for i in range(1, len(cdf)):
             if cdf[i] < cdf[i-1]:
                 return False, f"CDF not monotone at index {i}"
+        
+        # Check bounds if available
+        bounds = parse_numeric_bounds(question_obj)
+        if bounds:
+            min_bound, max_bound = bounds
+            
+            # Check grid bounds
+            grid_min = min(grid)
+            grid_max = max(grid)
+            if grid_min < min_bound:
+                return False, f"Grid min {grid_min} < bound {min_bound}"
+            if grid_max > max_bound:
+                return False, f"Grid max {grid_max} > bound {max_bound}"
+            
+            # Check p10/p50/p90 if present
+            for pname in ["p10", "p50", "p90"]:
+                pval = result.get(pname)
+                if pval is not None:
+                    if pval < min_bound or pval > max_bound:
+                        return False, f"{pname}={pval} outside bounds [{min_bound}, {max_bound}]"
     
     return True, ""
 
@@ -369,8 +492,30 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     
     valid, err = validate_mc_result(question_obj, mc_result)
     if not valid:
-        print(f"[ERROR] Validation failed for Q{qid}: {err}")
-        return False
+        # For numeric questions with bounds, try correction
+        qtype = question_obj.get("type", "").lower()
+        if "numeric" in qtype or "continuous" in qtype:
+            bounds = parse_numeric_bounds(question_obj)
+            if bounds:
+                print(f"[WARN] Initial validation failed for Q{qid}: {err}")
+                mc_result, success = correct_numeric_bounds(mc_result, bounds)
+                if success:
+                    # Re-validate after correction
+                    valid, err = validate_mc_result(question_obj, mc_result)
+                    if valid:
+                        print(f"[INFO] Correction successful for Q{qid}")
+                    else:
+                        print(f"[ERROR] Correction failed for Q{qid}: {err}")
+                        return False
+                else:
+                    print(f"[ERROR] Could not correct Q{qid}")
+                    return False
+            else:
+                print(f"[ERROR] Validation failed for Q{qid}: {err}")
+                return False
+        else:
+            print(f"[ERROR] Validation failed for Q{qid}: {err}")
+            return False
     
     payload = mc_results_to_metaculus_payload(question_obj, mc_result)
     
@@ -439,6 +584,15 @@ def run_test_mode():
         
         print(f"\n[INFO] Processing Q{qid}: {q['title']}")
         print(f"  AskNews facts: {len(facts)}")
+        
+        # Detect and print bounds for numeric questions
+        qtype = q.get("type", "").lower()
+        if "numeric" in qtype or "continuous" in qtype:
+            bounds = parse_numeric_bounds(q)
+            if bounds:
+                print(f"  Detected numeric bounds: [{bounds[0]}, {bounds[1]}]")
+            else:
+                print(f"  No numeric bounds detected")
         
         # Build context
         context = f"Question: {q['title']}\n\nDescription: {q['description']}\n\n"

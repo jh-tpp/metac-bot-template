@@ -41,9 +41,14 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         dict with 'p' (binary), 'probs' (MC), or 'cdf'/'grid' (numeric),
         plus optionally 'world_summaries' if return_evidence=True
     """
-    from main import llm_call  # import here to avoid circular dependency
+    from main import llm_call, parse_numeric_bounds  # import here to avoid circular dependency
     
     qtype = question_obj.get("type", "").lower()
+    
+    # Parse bounds for numeric questions
+    bounds = None
+    if "numeric" in qtype or "continuous" in qtype:
+        bounds = parse_numeric_bounds(question_obj)
     
     # Sample worlds
     worlds = []
@@ -51,9 +56,17 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         try:
             # Build prompt with context
             prompt = WORLD_PROMPT + f"\n\nContext (recent news):\n"
+            # Include top-k facts (k<=5) to reduce generic summaries, truncate to avoid token bloat
             for fact in context_facts[:5]:  # cap at 5 to keep prompt short
-                prompt += f"- {fact}\n"
+                # Truncate long facts to ~200 chars
+                fact_truncated = fact if len(fact) <= 200 else fact[:197] + "..."
+                prompt += f"- {fact_truncated}\n"
             prompt += f"\nQuestion to consider: {question_obj['title']}\n"
+            
+            # For numeric questions, add bounds constraint to prompt
+            if bounds:
+                min_bound, max_bound = bounds
+                prompt += f"\nIMPORTANT: When providing numeric estimates, all values MUST be within the range [{min_bound}, {max_bound}].\n"
             
             world = llm_call(prompt, max_tokens=800, temperature=0.7)
             worlds.append(world)
@@ -107,7 +120,7 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         # Each world gives a point estimate
         samples = []
         for w in worlds:
-            val = _world_numeric_estimate(w, question_obj)
+            val = _world_numeric_estimate(w, question_obj, bounds)
             if val is not None:
                 samples.append(val)
         
@@ -115,9 +128,20 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
             raise ValueError("No numeric samples generated")
         
         samples.sort()
-        # Build CDF on fixed grid
-        lo = question_obj.get("min", min(samples))
-        hi = question_obj.get("max", max(samples))
+        
+        # Build CDF on fixed grid using bounds
+        if bounds:
+            min_bound, max_bound = bounds
+            lo = min_bound
+            hi = max_bound
+        else:
+            lo = question_obj.get("min", min(samples))
+            hi = question_obj.get("max", max(samples))
+        
+        # Clamp samples to bounds if needed (safety)
+        samples = [max(lo, min(hi, s)) for s in samples]
+        samples.sort()
+        
         grid = [lo + (hi - lo) * i / 100 for i in range(101)]
         cdf = []
         for x in grid:
@@ -128,6 +152,22 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         result["p10"] = _percentile(samples, 0.10)
         result["p50"] = _percentile(samples, 0.50)
         result["p90"] = _percentile(samples, 0.90)
+        
+        # Validate bounds
+        if bounds:
+            min_bound, max_bound = bounds
+            grid_min = min(grid)
+            grid_max = max(grid)
+            
+            # Check if grid exceeds bounds (should not happen with our logic above)
+            if grid_min < min_bound or grid_max > max_bound:
+                print(f"[REJECT] numeric grid beyond bounds [{min_bound}, {max_bound}]: min={grid_min}, max={grid_max}")
+                # Already clamped samples, so grid should be ok now
+            
+            # Check percentiles
+            for pname, pval in [("p10", result["p10"]), ("p50", result["p50"]), ("p90", result["p90"])]:
+                if pval < min_bound or pval > max_bound:
+                    print(f"[REJECT] {pname}={pval} outside bounds [{min_bound}, {max_bound}]")
     
     if return_evidence:
         result["world_summaries"] = world_summaries
@@ -147,13 +187,18 @@ def _world_choice_mc(world: Dict, question_obj: Dict) -> int:
     k = len(question_obj.get("options", []))
     return random.randint(0, k - 1)
 
-def _world_numeric_estimate(world: Dict, question_obj: Dict) -> float:
+def _world_numeric_estimate(world: Dict, question_obj: Dict, bounds=None) -> float:
     """Heuristic: numeric estimate from world. (placeholder)."""
     # Real impl: parse world, extract numeric signal
     # For now, sample from uniform in question range
     import random
-    lo = question_obj.get("min", 0)
-    hi = question_obj.get("max", 100)
+    
+    if bounds:
+        lo, hi = bounds
+    else:
+        lo = question_obj.get("min", 0)
+        hi = question_obj.get("max", 100)
+    
     return random.uniform(lo, hi)
 
 def _percentile(sorted_values: List[float], p: float) -> float:
