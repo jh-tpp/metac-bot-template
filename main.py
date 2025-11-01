@@ -59,24 +59,40 @@ def fetch_tournament_questions(contest_slug=None):
         
         # Normalize to pipeline format
         questions = []
+        skipped_count = 0
+        
         for q in raw_questions:
             qid = q.get("id")
             if not qid:
                 continue
             
-            # Map question type
-            qtype = q.get("type", "")
-            if not qtype:
+            # Map question type to canonical set
+            raw_type = q.get("type", "")
+            qtype = None
+            
+            # Type mapping logic
+            if raw_type in ["binary", "Binary"]:
+                qtype = "binary"
+            elif raw_type in ["multiple_choice", "MultipleChoice"]:
+                qtype = "multiple_choice"
+            elif raw_type in ["numeric", "Numeric", "continuous", "Continuous"]:
+                qtype = "numeric"
+            else:
                 # Try to infer from possibilities
                 possibilities = q.get("possibilities", {})
-                if possibilities.get("type") == "binary":
+                poss_type = possibilities.get("type", "")
+                if poss_type == "binary":
                     qtype = "binary"
-                elif possibilities.get("type") == "multiple_choice":
+                elif poss_type == "multiple_choice":
                     qtype = "multiple_choice"
-                elif possibilities.get("type") == "numeric":
+                elif poss_type in ["numeric", "continuous"]:
                     qtype = "numeric"
-                else:
-                    qtype = "unknown"
+            
+            # Skip unsupported types
+            if not qtype:
+                print(f"[SKIP] Unsupported question type for Q{qid}: '{raw_type}'")
+                skipped_count += 1
+                continue
             
             # Extract title and description
             title = q.get("title") or q.get("name", "")
@@ -110,7 +126,7 @@ def fetch_tournament_questions(contest_slug=None):
                 normalized["options"] = []
             
             # Handle numeric bounds
-            if qtype == "numeric" or qtype == "continuous":
+            if qtype == "numeric":
                 # First try numerical_range (preferred)
                 numerical_range = q.get("numerical_range")
                 if numerical_range:
@@ -129,7 +145,7 @@ def fetch_tournament_questions(contest_slug=None):
             
             questions.append(normalized)
         
-        print(f"[INFO] Normalized {len(questions)} questions for processing")
+        print(f"[INFO] Normalized {len(questions)} questions for processing (skipped {skipped_count} unsupported)")
         return questions
         
     except requests.exceptions.HTTPError as e:
@@ -227,7 +243,7 @@ def fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q):
 
 def _get_asknews_token():
     """
-    Acquire an OAuth token from AskNews using client credentials.
+    Acquire an OAuth token from AskNews using client credentials (HTTP Basic auth).
     Returns access_token string or None on failure.
     """
     if not ASKNEWS_CLIENT_ID or not ASKNEWS_SECRET:
@@ -235,29 +251,33 @@ def _get_asknews_token():
         return None
     try:
         token_url = "https://auth.asknews.app/oauth2/token"
+        # Use HTTP Basic authentication (client_secret_basic)
+        auth = (ASKNEWS_CLIENT_ID, ASKNEWS_SECRET)
         data = {
-            "client_id": ASKNEWS_CLIENT_ID,
-            "client_secret": ASKNEWS_SECRET,
             "grant_type": "client_credentials",
             "scope": "news"
         }
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
-        resp = requests.post(token_url, data=data, headers=headers, timeout=10)
+        resp = requests.post(token_url, data=data, headers=headers, auth=auth, timeout=10)
         resp.raise_for_status()
         body = resp.json()
         token = body.get("access_token")
         if not token:
             print(f"[ERROR] AskNews token response missing access_token: {body}")
             return None
+        print("[INFO] AskNews token acquired successfully")
         return token
     except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code
         try:
             detail = e.response.json()
         except Exception:
             detail = e.response.text if hasattr(e.response, "text") else str(e)
-        print(f"[ERROR] AskNews OAuth HTTP error {e.response.status_code}: {detail}")
+        print(f"[ERROR] AskNews OAuth HTTP {status_code}: {detail}")
+        if status_code == 401:
+            print("[ERROR] AskNews 401 Unauthorized - check that credentials are correct and token endpoint expects HTTP Basic auth")
         return None
     except Exception as e:
         print(f"[ERROR] AskNews OAuth failed: {e}")
@@ -612,6 +632,14 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         bool success
     """
     qid = question_obj.get("id")
+    qtype = question_obj.get("type", "").lower()
+    
+    # Defensive guard: check for supported types before proceeding
+    supported_types = ["binary", "multiple_choice", "numeric", "continuous"]
+    if qtype not in supported_types:
+        print(f"[SKIP] Skipping post for Q{qid}: unsupported type '{qtype}'")
+        return False
+    
     if skip_set and qid in skip_set:
         print(f"[SKIP] Question {qid} already forecasted (dedupe).")
         return False
@@ -623,7 +651,6 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     valid, err = validate_mc_result(question_obj, mc_result)
     if not valid:
         # For numeric questions with bounds, try correction
-        qtype = question_obj.get("type", "").lower()
         if "numeric" in qtype or "continuous" in qtype:
             bounds = parse_numeric_bounds(question_obj)
             if bounds:
@@ -775,6 +802,10 @@ def run_tournament(mode="dryrun", publish=False):
     if not questions:
         print("[ERROR] No questions fetched. Check Metaculus API integration.")
         return
+    
+    # Log counts
+    total_fetched = len(questions)
+    print(f"[INFO] Tournament questions summary: {total_fetched} questions to process")
     
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
