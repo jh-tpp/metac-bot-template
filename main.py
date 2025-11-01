@@ -1,709 +1,467 @@
+import os
+import sys
+import json
 import argparse
-import asyncio
-import logging
-import os, json
-from datetime import date, datetime, timezone, timedelta
-from typing import Literal, List, Dict
+from datetime import datetime, timedelta
+from pathlib import Path
+import requests
 
-from forecasting_tools import (
-    AskNewsSearcher,
-    BinaryQuestion,
-    ForecastBot,
-    GeneralLlm,
-    MetaculusApi,
-    MetaculusQuestion,
-    MultipleChoiceQuestion,
-    NumericDistribution,
-    NumericQuestion,
-    Percentile,
-    BinaryPrediction,
-    PredictedOptionList,
-    ReasonedPrediction,
-    SmartSearcher,
-    clean_indents,
-    structure_output,
-)
+# Local modules
+from mc_worlds import run_mc_worlds, WORLD_PROMPT
+from adapters import mc_results_to_metaculus_payload, submit_forecast
 
-logger = logging.getLogger(__name__)
+# ========== Constants ==========
+N_WORLDS_DEFAULT = 30  # for tests
+N_WORLDS_TOURNAMENT = 100  # flip to this for production
+ASKNEWS_MAX_PER_Q = 8
+NEWS_CACHE_TTL_HOURS = 12
+CACHE_DIR = Path("cache")
+NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 
-# --- AskNews cache (tiny JSON file, 12h TTL) ---
-NEWS_CACHE_PATH = "cache/news_cache.json"
-NEWS_TTL_HOURS = 12
-pathlib.Path("cache").mkdir(exist_ok=True, parents=True)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"  # or adjust
+METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
+ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
+ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
-def _load_news_cache() -> dict:
+# ========== AskNews Cache Helpers ==========
+def _load_news_cache():
+    """Load news cache from disk; return empty dict if missing or corrupt."""
+    if not NEWS_CACHE_FILE.exists():
+        return {}
     try:
-        import json, io
-        with io.open(NEWS_CACHE_PATH, "r", encoding="utf-8") as f:
+        with open(NEWS_CACHE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] Could not load news cache: {e}")
         return {}
 
-def _save_news_cache(cache: dict) -> None:
-    import json, io
-    with io.open(NEWS_CACHE_PATH, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+def _save_news_cache(cache):
+    """Save news cache to disk."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    try:
+        with open(NEWS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[ERROR] Could not save news cache: {e}")
 
-def _now_ts() -> float:
-    return time.time()
-
-def _fresh(entry: dict) -> bool:
-    if not entry or "ts" not in entry: 
+def _is_fresh(entry, ttl_hours=NEWS_CACHE_TTL_HOURS):
+    """Check if cache entry is fresh (< ttl_hours old)."""
+    try:
+        ts = datetime.fromisoformat(entry["timestamp"])
+        age = datetime.utcnow() - ts
+        return age < timedelta(hours=ttl_hours)
+    except:
         return False
-    age_h = (_now_ts() - float(entry["ts"])) / 3600.0
-    return age_h < NEWS_TTL_HOURS
 
-def fetch_facts_for_batch(qid_to_text: dict, max_per_q: int = 8) -> dict:
+def fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q):
     """
-    Returns {qid: [ 'YYYY-MM-DD: headline (url)', ... ]}.
-    Uses AskNews if available; caches to cache/news_cache.json; 12h TTL.
-    Falls back to a single base-rate note if nothing found.
+    Fetch AskNews facts for a batch of questions.
+    
+    Args:
+        qid_to_text: dict of question_id -> question_text
+        max_per_q: max facts per question
+    
+    Returns:
+        dict of question_id -> list of "YYYY-MM-DD: headline (url)" strings
     """
     cache = _load_news_cache()
-    out = {}
-    # Try to construct AskNewsSearcher if creds exist
-    searcher = None
+    results = {}
+    to_fetch = {}
+    
+    # Check cache first
+    for qid, text in qid_to_text.items():
+        cache_key = str(qid)
+        if cache_key in cache and _is_fresh(cache[cache_key]):
+            results[qid] = cache[cache_key]["facts"]
+            print(f"[INFO] Using cached news for question {qid}")
+        else:
+            to_fetch[qid] = text
+    
+    # Fetch missing/stale
+    if to_fetch and ASKNEWS_CLIENT_ID and ASKNEWS_SECRET:
+        print(f"[INFO] Fetching AskNews for {len(to_fetch)} questions...")
+        for qid, text in to_fetch.items():
+            facts = _fetch_asknews_single(text, max_per_q)
+            results[qid] = facts
+            cache[str(qid)] = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "facts": facts
+            }
+        _save_news_cache(cache)
+    elif to_fetch:
+        print("[WARN] AskNews credentials missing; using fallback for uncached questions")
+        for qid in to_fetch:
+            results[qid] = ["No recent news available; base rates apply."]
+    
+    return results
+
+def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q):
+    """Fetch facts from AskNews for a single question; return list of formatted strings."""
     try:
-        cid = os.environ.get("ASKNEWS_CLIENT_ID")
-        sec = os.environ.get("ASKNEWS_SECRET")
-        if cid and sec:
-            from forecasting_tools import AskNewsSearcher
-            searcher = AskNewsSearcher(client_id=cid, client_secret=sec)
-    except Exception as e:
-        print(f"[NEWS][WARN] Could not init AskNewsSearcher: {e}")
-
-    for qid, qtext in qid_to_text.items():
-        if _fresh(cache.get(qid)):
-            out[qid] = cache[qid]["facts"][:max_per_q]
-            continue
-
+        # AskNews search endpoint (adjust to their API if different)
+        url = "https://api.asknews.app/v1/news/search"
+        headers = {
+            "X-Client-ID": ASKNEWS_CLIENT_ID,
+            "X-Client-Secret": ASKNEWS_SECRET,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "query": question_text,
+            "n_articles": max_facts,
+            "return_type": "both"  # or "context"
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        articles = data.get("articles", [])
         facts = []
-        if searcher:
-            try:
-                # Be defensive about method name differences across template versions
-                results = None
-                for meth in ("search_news", "search", "news"):
-                    if hasattr(searcher, meth):
-                        fn = getattr(searcher, meth)
-                        # Prefer very recent first; keep calls cheap
-                        results = fn(qtext, hours_back=48, max_results=12)
-                        break
-                # Normalize a few common shapes
-                for r in (results or []):
-                    date_iso = (r.get("published_at") or r.get("published") or r.get("date") or
-                                datetime.now(timezone.utc).date().isoformat())
-                    title = r.get("title") or r.get("headline") or (r.get("summary") or "").split(".")[0]
-                    url = r.get("url") or r.get("link")
-                    if title:
-                        facts.append(f"{date_iso[:10]}: {title}" + (f" ({url})" if url else ""))
-            except Exception as e:
-                print(f"[NEWS][WARN] qid={qid}: {e}")
-
+        for art in articles[:max_facts]:
+            pub_date = art.get("pub_date", "")[:10]  # YYYY-MM-DD
+            headline = art.get("headline", "Untitled")
+            link = art.get("article_url", "")
+            facts.append(f"{pub_date}: {headline} ({link})")
+        
         if not facts:
-            # Only if truly nothing found (or AskNews not available)
-            facts = [f"{datetime.utcnow().date().isoformat()}: no recent news extracted; use question text and base rates"]
+            facts = ["No recent news found; relying on base rates."]
+        return facts
+    except Exception as e:
+        print(f"[ERROR] AskNews fetch failed: {e}")
+        return ["AskNews unavailable; base rates only."]
 
-        cache[qid] = {"ts": _now_ts(), "facts": facts}
-        out[qid] = facts[:max_per_q]
-
-    _save_news_cache(cache)
-    return out
-
-# main.py (excerpt)
-from mc_worlds import run_mc_worlds
-
-class FallTemplateBot2025(ForecastBot):
+# ========== Hardened LLM Call ==========
+def llm_call(prompt, max_tokens=1500, temperature=0.3):
     """
-    This is a copy of the template bot for Fall 2025 Metaculus AI Tournament.
+    Call OpenRouter with JSON mode, strip fences, return parsed dict.
+    Raises on failure.
     """
-
-    _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
-    )
-    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
-
-    async def run_research(self, question: MetaculusQuestion) -> str:
-        async with self._concurrency_limiter:
-            research = ""
-            researcher = self.get_llm("researcher")
-
-            prompt = clean_indents(
-                f"""
-                You are an assistant to a superforecaster.
-                The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
-                You do not produce forecasts yourself.
-
-                Question:
-                {question.question_text}
-
-                This question's outcome will be determined by the specific criteria below:
-                {question.resolution_criteria}
-
-                {question.fine_print}
-                """
-            )
-
-            if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
-            elif researcher == "asknews/news-summaries":
-                research = await AskNewsSearcher().get_formatted_news_async(
-                    question.question_text
-                )
-            elif researcher == "asknews/deep-research/medium-depth":
-                research = await AskNewsSearcher().get_formatted_deep_research(
-                    question.question_text,
-                    sources=["asknews", "google"],
-                    search_depth=2,
-                    max_depth=4,
-                )
-            elif researcher == "asknews/deep-research/high-depth":
-                research = await AskNewsSearcher().get_formatted_deep_research(
-                    question.question_text,
-                    sources=["asknews", "google"],
-                    search_depth=4,
-                    max_depth=6,
-                )
-            elif researcher.startswith("smart-searcher"):
-                model_name = researcher.removeprefix("smart-searcher/")
-                searcher = SmartSearcher(
-                    model=model_name,
-                    temperature=0,
-                    num_searches_to_run=2,
-                    num_sites_per_search=10,
-                    use_advanced_filters=False,
-                )
-                research = await searcher.invoke(prompt)
-            elif not researcher or researcher == "None":
-                research = ""
-            else:
-                research = await self.get_llm("researcher", "llm").invoke(prompt)
-            logger.info(f"Found Research for URL {question.page_url}:\n{research}")
-            return research
-
-    async def _run_forecast_on_binary(
-        self, question: BinaryQuestion, research: str
-    ) -> ReasonedPrediction[float]:
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
-
-            Your interview question is:
-            {question.question_text}
-
-            Question background:
-            {question.background_info}
-
-
-            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A brief description of a scenario that results in a No outcome.
-            (d) A brief description of a scenario that results in a Yes outcome.
-
-            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
-
-            The last thing you write is your final answer as: "Probability: ZZ%", 0-100
-            """
-        )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        binary_prediction: BinaryPrediction = await structure_output(
-            reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
-        )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
-
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {decimal_pred}"
-        )
-        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
-
-    async def _run_forecast_on_multiple_choice(
-        self, question: MultipleChoiceQuestion, research: str
-    ) -> ReasonedPrediction[PredictedOptionList]:
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
-
-            Your interview question is:
-            {question.question_text}
-
-            The options are: {question.options}
-
-
-            Background:
-            {question.background_info}
-
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The status quo outcome if nothing changed.
-            (c) A description of an scenario that results in an unexpected outcome.
-
-            You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
-
-            The last thing you write is your final probabilities for the N options in this order {question.options} as:
-            Option_A: Probability_A
-            Option_B: Probability_B
-            ...
-            Option_N: Probability_N
-            """
-        )
-        parsing_instructions = clean_indents(
-            f"""
-            Make sure that all option names are one of the following:
-            {question.options}
-            The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.
-            """
-        )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        predicted_option_list: PredictedOptionList = await structure_output(
-            text_to_structure=reasoning,
-            output_type=PredictedOptionList,
-            model=self.get_llm("parser", "llm"),
-            additional_instructions=parsing_instructions,
-        )
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}"
-        )
-        return ReasonedPrediction(
-            prediction_value=predicted_option_list, reasoning=reasoning
-        )
-
-    async def _run_forecast_on_numeric(
-        self, question: NumericQuestion, research: str
-    ) -> ReasonedPrediction[NumericDistribution]:
-        upper_bound_message, lower_bound_message = (
-            self._create_upper_and_lower_bound_messages(question)
-        )
-        prompt = clean_indents(
-            f"""
-            You are a professional forecaster interviewing for a job.
-
-            Your interview question is:
-            {question.question_text}
-
-            Background:
-            {question.background_info}
-
-            {question.resolution_criteria}
-
-            {question.fine_print}
-
-            Units for answer: {question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"}
-
-            Your research assistant says:
-            {research}
-
-            Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-            {lower_bound_message}
-            {upper_bound_message}
-
-            Formatting Instructions:
-            - Please notice the units requested (e.g. whether you represent a number as 1,000,000 or 1 million).
-            - Never use scientific notation.
-            - Always start with a smaller number (more negative if negative) and then increase from there
-
-            Before answering you write:
-            (a) The time left until the outcome to the question is known.
-            (b) The outcome if nothing changed.
-            (c) The outcome if the current trend continued.
-            (d) The expectations of experts and markets.
-            (e) A brief description of an unexpected scenario that results in a low outcome.
-            (f) A brief description of an unexpected scenario that results in a high outcome.
-
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
-
-            The last thing you write is your final answer as:
-            "
-            Percentile 10: XX
-            Percentile 20: XX
-            Percentile 40: XX
-            Percentile 60: XX
-            Percentile 80: XX
-            Percentile 90: XX
-            "
-            """
-        )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
-        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
-        percentile_list: list[Percentile] = await structure_output(
-            reasoning, list[Percentile], model=self.get_llm("parser", "llm")
-        )
-        prediction = NumericDistribution.from_question(percentile_list, question)
-        logger.info(
-            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}"
-        )
-        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
-
-    def _create_upper_and_lower_bound_messages(
-        self, question: NumericQuestion
-    ) -> tuple[str, str]:
-        if question.nominal_upper_bound is not None:
-            upper_bound_number = question.nominal_upper_bound
-        else:
-            upper_bound_number = question.upper_bound
-        if question.nominal_lower_bound is not None:
-            lower_bound_number = question.nominal_lower_bound
-        else:
-            lower_bound_number = question.lower_bound
-
-        if question.open_upper_bound:
-            upper_bound_message = f"The question creator thinks the number is likely not higher than {upper_bound_number}."
-        else:
-            upper_bound_message = (
-                f"The outcome can not be higher than {upper_bound_number}."
-            )
-
-        if question.open_lower_bound:
-            lower_bound_message = f"The question creator thinks the number is likely not lower than {lower_bound_number}."
-        else:
-            lower_bound_message = (
-                f"The outcome can not be lower than {lower_bound_number}."
-            )
-        return upper_bound_message, lower_bound_message
-
-# ---- AskNews -> dated bullets for MC sampler ----
-    async def _asknews_bullets_async(qid_to_text: Dict[str, str]) -> Dict[str, List[str]]:
-        """
-        For each qid, fetch a compact 'latest' news summary and convert it into
-        dated bullet strings the MC prompt expects. Returns: {qid: [YYYY-MM-DD: fact, ...]}
-        """
-        searcher = AskNewsSearcher()
-        out: Dict[str, List[str]] = {}
-        from datetime import date
-        today = date.today().isoformat()
-
-    async def _one(qid: str, question_text: str) -> None:
-        # You can swap between news summaries (fast) and deep research (heavier)
-        # 1) fast:
-        text = await searcher.get_formatted_news_async(question_text)
-        # 2) deeper (comment the fast one and uncomment this if you want more detail):
-        # text = await searcher.get_formatted_deep_research(
-        #     question_text, sources=["asknews", "google"], search_depth=2, max_depth=4
-        # )
-        # Convert any lines into short dated facts. Keep the first ~5.
-        bullets = []
-        for raw in (text or "").splitlines():
-            s = raw.strip(" -•\t").strip()
-            if not s:
-                continue
-            # make each a dated compact fact. We don't rely on AskNews having dates inline.
-            bullets.append(f"{today}: {s}")
-            if len(bullets) == 5:
-                break
-        # fallback if AskNews returned nothing useful
-        if not bullets:
-            bullets = [f"{today}: no notable updates; use question text and base rates"]
-        out[qid] = bullets
-
-    await asyncio.gather(*[_one(qid, qtxt) for qid, qtxt in qid_to_text.items()])
-    return out
-
-# ---------- AskNews cache (lightweight) ----------
-    ASKNEWS_CACHE_PATH = ".cache/asknews.json"
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
     
-    def _load_asknews_cache() -> Dict[str, dict]:
-        try:
-            os.makedirs(os.path.dirname(ASKNEWS_CACHE_PATH), exist_ok=True)
-            if os.path.exists(ASKNEWS_CACHE_PATH):
-                with open(ASKNEWS_CACHE_PATH, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {}
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"}
+    }
     
-    def _save_asknews_cache(cache: Dict[str, dict]) -> None:
-        try:
-            os.makedirs(os.path.dirname(ASKNEWS_CACHE_PATH), exist_ok=True)
-            with open(ASKNEWS_CACHE_PATH, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
     
-    async def asknews_bullets_cached(
-        qid_to_text: Dict[str, str],
-        stale_days: int = 3,
-        max_bullets: int = 5,
-        force_refresh: bool = False,
-    ) -> Dict[str, List[str]]:
-        """
-        Returns {qid: [YYYY-MM-DD: fact, ...]} using AskNews only when (a) missing or (b) stale.
-        """
-        cache = _load_asknews_cache()
-        need_fetch: Dict[str, str] = {}
-        out: Dict[str, List[str]] = {}
-        today = date.today()
-        cutoff = today - timedelta(days=stale_days)
+    raw = resp.json()["choices"][0]["message"]["content"]
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines)
     
-        for qid, qtxt in qid_to_text.items():
-            item = cache.get(qid)
-            if not force_refresh and item:
-                try:
-                    fetched = date.fromisoformat(item["fetched_at"])
-                except Exception:
-                    fetched = cutoff - timedelta(days=1)
-                if fetched >= cutoff and item.get("bullets"):
-                    out[qid] = item["bullets"][:max_bullets]
-                    continue
-            need_fetch[qid] = qtxt
-    
-        fetched_count = 0
-        if need_fetch:
-            fresh = await _asknews_bullets_async(need_fetch)  # <- your existing async fetcher
-            for qid, bullets in fresh.items():
-                cache[qid] = {
-                    "fetched_at": today.isoformat(),
-                    "bullets": bullets[:max_bullets],
-                }
-                out[qid] = bullets[:max_bullets]
-                fetched_count += 1
-            _save_asknews_cache(cache)
-    
-        hits = len(qid_to_text) - fetched_count
-        print(f"[ASKNEWS] fetched {fetched_count}, cache hits {hits}, stale_days={stale_days}, force={force_refresh}")
-        return out
+    return json.loads(raw)
 
+# ========== Rationale Synthesizer ==========
+def synthesize_rationale(question_text, world_summaries, aggregate_forecast, max_worlds=12):
+    """
+    Produce 3-5 bullet rationale by summarizing world_summaries.
+    
+    Args:
+        question_text: str
+        world_summaries: list of str (world summary texts)
+        aggregate_forecast: dict with 'p' or 'probs' or 'cdf'
+        max_worlds: cap summaries to avoid huge prompts
+    
+    Returns:
+        list of bullet strings (no boilerplate)
+    """
+    summaries_subset = world_summaries[:max_worlds]
+    
+    # Format aggregate
+    if "p" in aggregate_forecast:
+        agg_str = f"Binary probability: {aggregate_forecast['p']:.2f}"
+    elif "probs" in aggregate_forecast:
+        probs = aggregate_forecast["probs"]
+        agg_str = f"Multiple-choice probabilities: {probs}"
+    elif "cdf" in aggregate_forecast:
+        p10 = aggregate_forecast.get("p10", "?")
+        p50 = aggregate_forecast.get("p50", "?")
+        p90 = aggregate_forecast.get("p90", "?")
+        agg_str = f"Numeric forecast (p10/p50/p90): {p10}/{p50}/{p90}"
+    else:
+        agg_str = "Forecast available"
+    
+    prompt = f"""You are a forecasting analyst. Given these Monte-Carlo world summaries and the aggregate forecast, produce 3-5 specific, evidence-based bullet points explaining the reasoning. Do NOT include boilerplate like "will adjust later" or "subject to change".
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+Question: {question_text}
 
-    # Suppress LiteLLM logging
-    litellm_logger = logging.getLogger("LiteLLM")
-    litellm_logger.setLevel(logging.WARNING)
-    litellm_logger.propagate = False
+Aggregate Forecast: {agg_str}
 
-    parser = argparse.ArgumentParser(
-        description="Run the Q1TemplateBot forecasting system"
-    )
+World Summaries (sample of {len(summaries_subset)}):
+{chr(10).join(f"- {s}" for s in summaries_subset)}
+
+Return JSON: {{"bullets": ["bullet1", "bullet2", ...]}}
+"""
+    try:
+        result = llm_call(prompt, max_tokens=800, temperature=0.3)
+        bullets = result.get("bullets", [])
+        return bullets[:5]  # cap at 5
+    except Exception as e:
+        print(f"[ERROR] Rationale synthesis failed: {e}")
+        return ["Could not synthesize rationale due to LLM error."]
+
+# ========== Validation ==========
+def validate_mc_result(question_obj, result):
+    """
+    Validate MC result against question type.
+    
+    Returns: (bool, error_msg)
+    """
+    qtype = question_obj.get("type", "").lower()
+    
+    if "binary" in qtype:
+        p = result.get("p")
+        if p is None:
+            return False, "Binary result missing 'p'"
+        if not (0.01 <= p <= 0.99):
+            return False, f"Binary p={p} out of [0.01, 0.99]"
+    
+    elif "multiple" in qtype or "mc" in qtype:
+        probs = result.get("probs")
+        if not probs:
+            return False, "MC result missing 'probs'"
+        
+        # Infer k from question
+        k = len(question_obj.get("options", []))
+        if k == 0:
+            return False, "Cannot infer k from question options"
+        
+        if len(probs) != k:
+            return False, f"MC probs length {len(probs)} != k={k}"
+        
+        total = sum(probs)
+        if abs(total - 1.0) > 1e-6:
+            return False, f"MC probs sum to {total}, not 1.0"
+        
+        if any(p < 0 or p > 1 for p in probs):
+            return False, "MC probs contain values outside [0,1]"
+    
+    elif "numeric" in qtype or "continuous" in qtype:
+        cdf = result.get("cdf")
+        grid = result.get("grid")
+        if not cdf or not grid:
+            return False, "Numeric result missing 'cdf' or 'grid'"
+        
+        if len(cdf) != len(grid):
+            return False, f"CDF length {len(cdf)} != grid length {len(grid)}"
+        
+        if any(c < 0 or c > 1 for c in cdf):
+            return False, "CDF contains values outside [0,1]"
+        
+        # Check monotone
+        for i in range(1, len(cdf)):
+            if cdf[i] < cdf[i-1]:
+                return False, f"CDF not monotone at index {i}"
+    
+    return True, ""
+
+# ========== Forecast Submission (with guardrails) ==========
+def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
+    """
+    Post forecast if all checks pass.
+    
+    Args:
+        question_obj: Metaculus question dict
+        mc_result: dict with 'p' or 'probs' or 'cdf'/'grid', plus 'reasoning'
+        publish: bool, actually POST or just dry-run
+        skip_set: set of qids already forecasted (optional)
+    
+    Returns:
+        bool success
+    """
+    qid = question_obj.get("id")
+    if skip_set and qid in skip_set:
+        print(f"[SKIP] Question {qid} already forecasted (dedupe).")
+        return False
+    
+    if question_obj.get("resolution") is not None:
+        print(f"[SKIP] Question {qid} already resolved.")
+        return False
+    
+    valid, err = validate_mc_result(question_obj, mc_result)
+    if not valid:
+        print(f"[ERROR] Validation failed for Q{qid}: {err}")
+        return False
+    
+    payload = mc_results_to_metaculus_payload(question_obj, mc_result)
+    
+    if not publish:
+        print(f"[DRYRUN] Would post to Q{qid}: {payload}")
+        return True
+    
+    try:
+        submit_forecast(qid, payload, METACULUS_TOKEN)
+        print(f"[SUCCESS] Posted forecast for Q{qid}")
+        if skip_set is not None:
+            skip_set.add(qid)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to post Q{qid}: {e}")
+        return False
+
+# ========== Test Mode ==========
+def run_test_mode():
+    """
+    Fetch 3 example questions, run MC with AskNews, write artifacts.
+    """
+    print("[TEST MODE] Starting...")
+    
+    # Fixture: 3 example questions (replace with real Metaculus API call if available)
+    test_questions = [
+        {
+            "id": 12345,
+            "type": "binary",
+            "title": "Will AGI be developed by 2030?",
+            "description": "Resolution criteria: ...",
+            "options": []
+        },
+        {
+            "id": 12346,
+            "type": "multiple_choice",
+            "title": "Which company will lead AI in 2026?",
+            "description": "Options: Google, OpenAI, Anthropic, Meta",
+            "options": [
+                {"name": "Google"},
+                {"name": "OpenAI"},
+                {"name": "Anthropic"},
+                {"name": "Meta"}
+            ]
+        },
+        {
+            "id": 12347,
+            "type": "numeric",
+            "title": "US GDP growth in 2025 (%)?",
+            "description": "Range: -5 to 10",
+            "options": []
+        }
+    ]
+    
+    # Fetch AskNews facts
+    qid_to_text = {q["id"]: q["title"] + " " + q["description"] for q in test_questions}
+    news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
+    
+    # Run MC worlds
+    all_results = []
+    all_reasons = []
+    
+    for q in test_questions:
+        qid = q["id"]
+        facts = news.get(qid, [])
+        
+        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
+        print(f"  AskNews facts: {len(facts)}")
+        
+        # Build context
+        context = f"Question: {q['title']}\n\nDescription: {q['description']}\n\n"
+        context += "Recent News:\n" + "\n".join(f"- {f}" for f in facts)
+        
+        # Run MC
+        mc_out = run_mc_worlds(
+            question_obj=q,
+            context_facts=facts,
+            n_worlds=N_WORLDS_DEFAULT,
+            return_evidence=True
+        )
+        
+        # Synthesize rationale
+        world_summaries = mc_out.get("world_summaries", [])
+        aggregate = {k: v for k, v in mc_out.items() if k != "world_summaries"}
+        bullets = synthesize_rationale(q["title"], world_summaries, aggregate)
+        
+        mc_out["reasoning"] = bullets
+        all_results.append({
+            "question_id": qid,
+            "question_title": q["title"],
+            "forecast": mc_out
+        })
+        
+        all_reasons.append(f"Q{qid}: {q['title']}")
+        for b in bullets:
+            all_reasons.append(f"  • {b}")
+        all_reasons.append("")
+    
+    # Write artifacts
+    with open("mc_results.json", "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    
+    with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(all_reasons))
+    
+    print("\n[TEST MODE] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+
+# ========== Tournament Modes ==========
+def run_tournament(mode="dryrun", publish=False):
+    """
+    Fetch tournament questions, run MC, post (if publish=True).
+    """
+    print(f"[TOURNAMENT MODE: {mode}] Starting...")
+    
+    # TODO: fetch questions from Metaculus tournament API
+    # For now, placeholder
+    questions = []  # replace with real fetch
+    
+    if not questions:
+        print("[ERROR] No questions fetched. Check Metaculus API integration.")
+        return
+    
+    qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
+    news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
+    
+    skip_set = set()  # dedupe already-forecasted
+    
+    for q in questions:
+        qid = q["id"]
+        facts = news.get(qid, [])
+        
+        mc_out = run_mc_worlds(
+            question_obj=q,
+            context_facts=facts,
+            n_worlds=N_WORLDS_DEFAULT,  # flip to N_WORLDS_TOURNAMENT for production
+            return_evidence=True
+        )
+        
+        world_summaries = mc_out.pop("world_summaries", [])
+        aggregate = mc_out
+        bullets = synthesize_rationale(q["title"], world_summaries, aggregate)
+        aggregate["reasoning"] = bullets
+        
+        post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
+    
+    print(f"[TOURNAMENT MODE: {mode}] Complete.")
+
+# ========== Main CLI ==========
+def main():
+    parser = argparse.ArgumentParser(description="Metaculus MC Bot")
     parser.add_argument(
         "--mode",
-        type=str,
-        choices=["tournament", "metaculus_cup", "test_questions"],
-        default="tournament",
-        help="Specify the run mode (default: tournament)",
+        choices=["test_questions", "tournament_dryrun", "tournament_submit"],
+        required=True,
+        help="Run mode"
     )
     args = parser.parse_args()
-    run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
-    assert run_mode in [
-        "tournament",
-        "metaculus_cup",
-        "test_questions",
-    ], "Invalid run mode"
-    print(f"RUN_MODE = {run_mode}")
+    
+    if args.mode == "test_questions":
+        run_test_mode()
+    elif args.mode == "tournament_dryrun":
+        run_tournament(mode="dryrun", publish=False)
+    elif args.mode == "tournament_submit":
+        run_tournament(mode="submit", publish=True)
 
-    template_bot = FallTemplateBot2025(
-        research_reports_per_question=1,
-        predictions_per_research_report=1,
-        use_research_summary_to_forecast=False,
-        publish_reports_to_metaculus=False,
-        folder_to_save_reports_to=None,
-        skip_previously_forecasted_questions=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o", # "anthropic/claude-3-5-sonnet-20241022", etc (see docs for litellm)
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/deep-research/low",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
-    )
-
-    if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                MetaculusApi.CURRENT_AI_COMPETITION_ID, return_exceptions=True
-            )
-        )
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                MetaculusApi.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
-        )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
-    elif run_mode == "metaculus_cup":
-        # The Metaculus cup is a good way to test the bot's performance on regularly open questions. You can also use AXC_2025_TOURNAMENT_ID = 32564 or AI_2027_TOURNAMENT_ID = "ai-2027"
-        # The Metaculus cup may not be initialized near the beginning of a season (i.e. January, May, September)
-        template_bot.skip_previously_forecasted_questions = False
-        forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                MetaculusApi.CURRENT_METACULUS_CUP_ID, return_exceptions=True
-            )
-        )
-    elif run_mode == "test_questions_old":
-        # Example questions are a good way to test the bot's performance on a single question
-        EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
-            #"https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
-           # "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
-          #  "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
-        ]
-        template_bot.skip_previously_forecasted_questions = False
-        questions = [
-            MetaculusApi.get_question_by_url(question_url)
-            for question_url in EXAMPLE_QUESTIONS
-        ]
-        forecast_reports = asyncio.run(
-            template_bot.forecast_questions(questions, return_exceptions=True)
-        )
-    elif run_mode == "test_questions":
-        # Keep your example set (binary, numeric, MC)
-        EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",           # binary
-            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",     # numeric
-            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",      # multiple choice
-        ]
-        template_bot.skip_previously_forecasted_questions = False
-    
-        # Resolve question objects (used for texts, types, etc.)
-        questions = [MetaculusApi.get_question_by_url(url) for url in EXAMPLE_QUESTIONS]
-    
-        # Build the minimal MC input (ids and coarse types)
-        def _qtype(q):
-            if isinstance(q, BinaryQuestion): return "binary"
-            if isinstance(q, MultipleChoiceQuestion): return "multiple_choice"
-            return "numeric"  # default
-        mc_questions = []
-        qid_to_text = {}
-        for idx, q in enumerate(questions, start=1):
-            # pydantic v2 fields vary; grab an id robustly
-            qid = getattr(q, "question_id", None) or getattr(q, "id", None)
-            if qid is None:
-                url = q.page_url if hasattr(q, "page_url") else EXAMPLE_QUESTIONS[idx-1]
-                import re
-                m = re.search(r"/questions/(\d+)", url)
-                qid = m.group(1) if m else f"T{idx}"
-            qid = str(qid)
-            mc_questions.append({"id": qid, "type": _qtype(q)})
-            # plain text for AskNews
-            qtext = getattr(q, "title", None) or getattr(q, "question_text", None) or "Forecasting question"
-            qid_to_text[qid] = qtext
-    
-        # === NEW: fetch dated facts from AskNews with cache (or a single fallback line) ===
-        research_by_q = fetch_facts_for_batch(qid_to_text, max_per_q=8)
-    
-        # Run MC on this batch
-        from mc_worlds import run_mc_worlds, collect_world_summaries
-        N_WORLDS = 30
-        results, evidence = run_mc_worlds(
-            open_questions=mc_questions,
-            research_by_q=research_by_q,
-            llm_call=llm_call,
-            n_worlds=N_WORLDS,
-            batch_size=12,
-            return_evidence=True,
-        )
-    
-        # Persist raw outputs for inspection
-        import json, io
-        with io.open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-    
-        # Synthesize short, question-specific reasons from the world summaries (not per-world)
-        def synth_reason(qtext: str, worlds: list, mc_fore: dict) -> str:
-            ws = collect_world_summaries(worlds)
-            subset = ws[:12] if len(ws) > 12 else ws
-            if not subset:
-                subset = ["A baseline world with no major recent shocks; outcomes depend on usual mechanisms."]
-            summaries_block = "\n".join("- " + s.replace("\n", " ").strip() for s in subset)
-            # small, cheap prompt that references THIS question
-            prm = f"""
-            You are writing a short rationale for a Metaculus forecast on ONE question.
-            
-            Question:
-            {qtext}
-            
-            Sampled world summaries (evidence):
-            {summaries_block}
-            
-            Monte Carlo aggregate (for context):
-            {json.dumps(mc_fore)[:800]}
-            
-            Write 3–5 *specific* bullet points that explain the forecast for THIS question.
-            Use only the evidence above (no outside facts). Name concrete drivers (e.g., “policy timeline”, “tech milestone”, “base rate X”).
-            Avoid boilerplate and generic phrases. No “will adjust later”.
-            """
-            import json as _json, urllib.request as _rq
-            api_key = os.environ["OPENROUTER_API_KEY"]
-            payload = {
-                "model": "openrouter/openai/gpt-4o-mini",
-                "messages": [{"role": "user", "content": prm}],
-                "temperature": 0.2,
-                "max_tokens": 250,
-            }
-            req = _rq.Request(
-                "https://openrouter.ai/api/v1/chat/completions",
-                data=_json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                    "X-Title": "Metaculus MC rationale",
-                },
-            )
-            with _rq.urlopen(req, timeout=60) as resp:
-                body = _json.loads(resp.read().decode("utf-8"))
-            txt = body["choices"][0]["message"]["content"].strip()
-            # Keep only bullets and trim
-            lines = [ln.strip() for ln in txt.splitlines() if ln.strip().startswith(("-", "•", "*"))]
-            if not lines:
-                lines = [txt]
-            return "\n".join(lines[:5])
-    
-        # Build reasons per question from the *same* worlds used for results
-        reasons_lines = []
-        for q in mc_questions:
-            qid = q["id"]; qtext = qid_to_text[qid]
-            worlds_for_q = evidence.get(qid, {}).get("binary_yes", []) + evidence.get(qid, {}).get("binary_no", [])
-            # If we didn't track per-world text above, reuse all worlds by passing them from results aggregation call
-            # (run_mc_worlds returns 'evidence' with per-question buckets; we only need the world summaries)
-            # For simplicity, just reuse all worlds we sampled: collect from evidence buckets (already populated)
-            bullets = synth_reason(qtext, worlds=evidence.get(qid, {}).get("numeric", []) or [], mc_fore=results.get(qid, {}))
-            # If numeric bucket is empty (common), regenerate using the binary_yes/no summaries we collected
-            if not bullets.strip() or "drivers synthesized" in bullets.lower():
-                # fallback: use any summaries we captured for this q
-                from mc_worlds import collect_world_summaries
-                # Reconstruct a list of summaries from all buckets we stored (we put summaries into binary_yes/no)
-                summaries = evidence.get(qid, {}).get("binary_yes", []) + evidence.get(qid, {}).get("binary_no", [])
-                bullets = synth_reason(qtext, worlds=[{"world_summary": s} for s in summaries] or [], mc_fore=results.get(qid, {}))
-            reasons_lines.append(f"[MC][REASON] Q{qid}:\n{bullets}\n")
-    
-        with open("mc_reasons.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(reasons_lines))
-    
-        print("[MC] wrote mc_results.json")
-        print("[MC] wrote mc_reasons.txt")
-        print("[MC] SENTINEL: end of test batch.")
-
-    
-    try:
-        template_bot.log_report_summary(forecast_reports)
-    except NameError:
-        pass
+if __name__ == "__main__":
+    main()
