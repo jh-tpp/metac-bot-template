@@ -1,0 +1,44 @@
+name: Check OpenRouter Credits
+
+on:
+  workflow_dispatch: {}        # lets you run it by clicking a button
+  # schedule:                  # optional: uncomment to run daily at 07:00 UTC
+  #   - cron: "0 7 * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query credits JSON
+        id: credits
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          RESP="$(curl -sS https://openrouter.ai/api/v1/credits \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY")"
+          echo "$RESP" > credits.json
+          python - <<'PY'
+import os, json
+with open('credits.json') as f:
+    data=json.load(f)
+tc=data.get('data',{}).get('total_credits',0)
+tu=data.get('data',{}).get('total_usage',0)
+rem=(tc or 0)-(tu or 0)
+# expose outputs for later steps
+with open(os.environ['GITHUB_OUTPUT'],'a') as g:
+    g.write(f"total_credits={tc}\n")
+    g.write(f"total_usage={tu}\n")
+    g.write(f"remaining={rem}\n")
+print("TOTAL_CREDITS:", tc)
+print("TOTAL_USAGE:", tu)
+print("REMAINING:", rem)
+PY
+
+      - name: Show summary
+        run: |
+          echo "### OpenRouter Credits" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Total credits | Total usage | Remaining |" >> $GITHUB_STEP_SUMMARY
+          echo "|---:|---:|---:|" >> $GITHUB_STEP_SUMMARY
+          echo "| ${{ steps.credits.outputs.total_credits }} | ${{ steps.credits.outputs.total_usage }} | ${{ steps.credits.outputs.remaining }} |" >> $GITHUB_STEP_SUMMARY
