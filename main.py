@@ -14,7 +14,7 @@ from adapters import mc_results_to_metaculus_payload, submit_forecast
 N_WORLDS_DEFAULT = 30  # for tests
 N_WORLDS_TOURNAMENT = 100  # flip to this for production
 ASKNEWS_MAX_PER_Q = 8
-NEWS_CACHE_TTL_HOURS = 12
+NEWS_CACHE_TTL_HOURS = 168
 CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 
@@ -81,14 +81,23 @@ def fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q):
     # Fetch missing/stale
     if to_fetch and ASKNEWS_CLIENT_ID and ASKNEWS_SECRET:
         print(f"[INFO] Fetching AskNews for {len(to_fetch)} questions...")
-        for qid, text in to_fetch.items():
-            facts = _fetch_asknews_single(text, max_per_q)
-            results[qid] = facts
-            cache[str(qid)] = {
-                "timestamp": datetime.utcnow().isoformat(),
-                "facts": facts
-            }
-        _save_news_cache(cache)
+        # Acquire token once for the entire batch
+        token = _get_asknews_token()
+        if token:
+            print(f"[INFO] Using single OAuth token for batch of {len(to_fetch)} questions")
+            for qid, text in to_fetch.items():
+                facts = _fetch_asknews_single(text, max_per_q, token=token)
+                results[qid] = facts
+                cache[str(qid)] = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "facts": facts
+                }
+            _save_news_cache(cache)
+        else:
+            # Token acquisition failed, fall back to base-rate for all uncached
+            print("[WARN] AskNews token acquisition failed; using fallback for uncached questions")
+            for qid in to_fetch:
+                results[qid] = ["No recent news available; base rates apply."]
     elif to_fetch:
         print("[WARN] AskNews credentials missing; using fallback for uncached questions")
         for qid in to_fetch:
@@ -134,9 +143,10 @@ def _get_asknews_token():
         print(f"[ERROR] AskNews OAuth failed: {e}")
         return None
 
-def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q):
+def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q, token=None):
     """Fetch facts from AskNews for a single question; return list of formatted strings."""
-    token = _get_asknews_token()
+    if token is None:
+        token = _get_asknews_token()
     if not token:
         # Authentication failed; return base-rate fallback
         return ["AskNews unavailable; base rates only."]
