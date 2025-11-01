@@ -24,6 +24,126 @@ METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
+# ========== Tournament Question Fetcher ==========
+def fetch_tournament_questions(contest_slug=None):
+    """
+    Fetch open questions from a Metaculus contest.
+    
+    Args:
+        contest_slug: Contest slug to filter by (defaults to METACULUS_CONTEST_SLUG env or "fall-aib")
+    
+    Returns:
+        List of question dicts normalized for pipeline
+    """
+    from typing import List, Dict, Any
+    
+    if contest_slug is None:
+        contest_slug = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
+    
+    url = "https://www.metaculus.com/api2/questions/"
+    params = {
+        "search": f"contest:{contest_slug}",
+        "status": "open",
+        "limit": 1000,
+        "order_by": "-activity"
+    }
+    
+    try:
+        print(f"[INFO] Fetching tournament questions for contest: {contest_slug}")
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        raw_questions = data.get("results", [])
+        print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
+        
+        # Normalize to pipeline format
+        questions = []
+        for q in raw_questions:
+            qid = q.get("id")
+            if not qid:
+                continue
+            
+            # Map question type
+            qtype = q.get("type", "")
+            if not qtype:
+                # Try to infer from possibilities
+                possibilities = q.get("possibilities", {})
+                if possibilities.get("type") == "binary":
+                    qtype = "binary"
+                elif possibilities.get("type") == "multiple_choice":
+                    qtype = "multiple_choice"
+                elif possibilities.get("type") == "numeric":
+                    qtype = "numeric"
+                else:
+                    qtype = "unknown"
+            
+            # Extract title and description
+            title = q.get("title") or q.get("name", "")
+            description = q.get("description", "")
+            
+            # Build normalized question
+            normalized = {
+                "id": qid,
+                "type": qtype,
+                "title": title,
+                "description": description,
+                "url": f"https://www.metaculus.com/questions/{qid}/"
+            }
+            
+            # Handle multiple choice options
+            if qtype == "multiple_choice":
+                # Try to get options from possibilities or options field
+                possibilities = q.get("possibilities", {})
+                options_data = possibilities.get("options") or q.get("options", [])
+                
+                # Normalize option format
+                options = []
+                if isinstance(options_data, list):
+                    for opt in options_data:
+                        if isinstance(opt, dict):
+                            options.append({"name": opt.get("name", opt.get("text", ""))})
+                        elif isinstance(opt, str):
+                            options.append({"name": opt})
+                normalized["options"] = options
+            else:
+                normalized["options"] = []
+            
+            # Handle numeric bounds
+            if qtype == "numeric" or qtype == "continuous":
+                # First try numerical_range (preferred)
+                numerical_range = q.get("numerical_range")
+                if numerical_range:
+                    min_val = numerical_range.get("min")
+                    max_val = numerical_range.get("max")
+                    if min_val is not None:
+                        normalized["min"] = float(min_val)
+                    if max_val is not None:
+                        normalized["max"] = float(max_val)
+                else:
+                    # Fallback to range_min/range_max
+                    if "range_min" in q:
+                        normalized["min"] = float(q["range_min"])
+                    if "range_max" in q:
+                        normalized["max"] = float(q["range_max"])
+            
+            questions.append(normalized)
+        
+        print(f"[INFO] Normalized {len(questions)} questions for processing")
+        return questions
+        
+    except requests.exceptions.HTTPError as e:
+        status = getattr(e.response, "status_code", "N/A")
+        try:
+            detail = e.response.text[:400]
+        except Exception:
+            detail = str(e)
+        print(f"[ERROR] Failed to fetch tournament questions (HTTP {status}): {detail}")
+        return []
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch tournament questions: {e}")
+        return []
+
 # ========== AskNews Cache Helpers ==========
 def _load_news_cache():
     """Load news cache from disk; return empty dict if missing or corrupt."""
@@ -649,9 +769,8 @@ def run_tournament(mode="dryrun", publish=False):
     """
     print(f"[TOURNAMENT MODE: {mode}] Starting...")
     
-    # TODO: fetch questions from Metaculus tournament API
-    # For now, placeholder
-    questions = []  # replace with real fetch
+    # Fetch questions from Metaculus tournament API
+    questions = fetch_tournament_questions()
     
     if not questions:
         print("[ERROR] No questions fetched. Check Metaculus API integration.")
@@ -661,10 +780,14 @@ def run_tournament(mode="dryrun", publish=False):
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     
     skip_set = set()  # dedupe already-forecasted
+    all_results = []
+    all_reasons = []
     
     for q in questions:
         qid = q["id"]
         facts = news.get(qid, [])
+        
+        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
         
         mc_out = run_mc_worlds(
             question_obj=q,
@@ -678,9 +801,28 @@ def run_tournament(mode="dryrun", publish=False):
         bullets = synthesize_rationale(q["title"], world_summaries, aggregate)
         aggregate["reasoning"] = bullets
         
+        # Store results for artifacts
+        all_results.append({
+            "question_id": qid,
+            "question_title": q["title"],
+            "forecast": aggregate
+        })
+        
+        all_reasons.append(f"Q{qid}: {q['title']}")
+        for b in bullets:
+            all_reasons.append(f"  • {b}")
+        all_reasons.append("")
+        
         post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
     
-    print(f"[TOURNAMENT MODE: {mode}] Complete.")
+    # Write artifacts
+    with open("mc_results.json", "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    
+    with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(all_reasons))
+    
+    print(f"[TOURNAMENT MODE: {mode}] Complete. Artifacts: mc_results.json, mc_reasons.txt")
 
 # ========== Main CLI ==========
 def main():
