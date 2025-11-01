@@ -1,4 +1,4 @@
-"""import os
+import os
 import sys
 import json
 import argparse
@@ -208,7 +208,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
         except Exception:
             body = e.response.text if hasattr(e.response, "text") else str(e)
         raise RuntimeError(
-            f"OpenRouter API HTTP {{getattr(e.response, 'status_code', 'N/A')}}: {{body}}\n"
+            f"OpenRouter API HTTP {getattr(e.response, 'status_code', 'N/A')}: {body}\n"
             "Check OPENROUTER_API_KEY, model accessibility, and account quota. "
             "Model setting not modified by this patch."
         )
@@ -227,7 +227,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
         lines = raw.split("\n")
         if lines[0].startswith("```"):
             lines = lines[1:]
-        if lines and lines[-1].strip() == "``":
+        if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         raw = "\n".join(lines)
 
@@ -535,4 +535,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
