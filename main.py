@@ -54,6 +54,86 @@ def _normalize_question_type(raw_type):
     normalized_key = raw_type.lower().replace("-", "").replace("_", "")
     return type_mapping.get(normalized_key, "")
 
+def _infer_qtype_and_fields(q):
+    """
+    Infer question type and extract relevant fields from Metaculus API2 question object.
+    Inspects q.get("possibility") and falls back to q.get("type") for test stubs.
+    
+    Args:
+        q: Question dict from Metaculus API2
+    
+    Returns:
+        Tuple (qtype, extra) where:
+        - qtype: str in {"binary", "numeric", "multiple_choice", "date", "unknown"}
+        - extra: dict with optional keys:
+            - "options": list[str] for multiple_choice
+            - "numeric_bounds": dict with min, max, unit, scale for numeric
+    """
+    extra = {}
+    
+    # Check possibility field first (API2 live schema)
+    possibility = q.get("possibility", {})
+    poss_type = possibility.get("type", "").lower() if possibility else ""
+    
+    # Fallback to top-level type for test stubs
+    fallback_type = q.get("type", "").lower()
+    
+    # Normalize possibility.type values to canonical types
+    # Handle common possibility.type values
+    if poss_type in ["binary", "bool"]:
+        qtype = "binary"
+    elif poss_type in ["one_of", "categorical", "multiple_choice"]:
+        qtype = "multiple_choice"
+        # Extract options
+        options_data = possibility.get("options", [])
+        options = []
+        for i, opt in enumerate(options_data):
+            if isinstance(opt, dict):
+                # Try keys: name, label, title
+                name = opt.get("name") or opt.get("label") or opt.get("title") or f"opt_{i}"
+                options.append(name)
+            elif isinstance(opt, str):
+                options.append(opt)
+            else:
+                options.append(f"opt_{i}")
+        extra["options"] = options
+    elif poss_type in ["continuous", "float", "integer", "number"]:
+        qtype = "numeric"
+        # Extract numeric bounds
+        numeric_bounds = {}
+        if "min" in possibility:
+            numeric_bounds["min"] = possibility["min"]
+        if "max" in possibility:
+            numeric_bounds["max"] = possibility["max"]
+        if "unit" in possibility:
+            numeric_bounds["unit"] = possibility["unit"]
+        if "scale" in possibility:
+            numeric_bounds["scale"] = possibility["scale"]
+        if numeric_bounds:
+            extra["numeric_bounds"] = numeric_bounds
+    elif poss_type == "date":
+        qtype = "date"
+        # Dates can be treated as numeric (timestamp)
+        # Extract date bounds if present
+        numeric_bounds = {}
+        if "min" in possibility:
+            numeric_bounds["min"] = possibility["min"]
+        if "max" in possibility:
+            numeric_bounds["max"] = possibility["max"]
+        if numeric_bounds:
+            extra["numeric_bounds"] = numeric_bounds
+    elif fallback_type:
+        # Use fallback type if possibility.type not recognized
+        normalized = _normalize_question_type(fallback_type)
+        if normalized:
+            qtype = normalized
+        else:
+            qtype = "unknown"
+    else:
+        qtype = "unknown"
+    
+    return (qtype, extra)
+
 def fetch_tournament_questions(contest_slug=None):
     """
     Fetch open questions from a Metaculus contest.
@@ -86,6 +166,15 @@ def fetch_tournament_questions(contest_slug=None):
         raw_questions = data.get("results", [])
         print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
         
+        # Debug smoke-print: show sample of first 5 questions
+        print(f"[DEBUG] Sample of first {min(5, len(raw_questions))} questions:")
+        for i, q in enumerate(raw_questions[:5]):
+            qid = q.get("id", "?")
+            poss = q.get("possibility", {})
+            poss_type = poss.get("type", "") if poss else ""
+            q_type = q.get("type", "")
+            print(f"  Q{qid}: possibility.type={repr(poss_type)}, q.type={repr(q_type)}")
+        
         # Normalize to pipeline format
         questions = []
         skipped_count = 0
@@ -95,22 +184,18 @@ def fetch_tournament_questions(contest_slug=None):
             if not qid:
                 continue
             
-            # Map question type - normalize to canonical set
-            raw_type = q.get("type", "")
-            qtype = _normalize_question_type(raw_type)
+            # Use new helper to infer question type and extract fields
+            qtype, extra = _infer_qtype_and_fields(q)
             
-            if not qtype:
-                # Try to infer from possibilities if raw type not recognized
-                possibilities = q.get("possibilities", {})
-                poss_type = possibilities.get("type", "")
-                qtype = _normalize_question_type(poss_type)
-                
-                if not qtype:
-                    # Unknown/unmappable type - skip question with explicit source info
-                    type_source = raw_type if raw_type else (poss_type if poss_type else "unknown")
-                    print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
-                    skipped_count += 1
-                    continue
+            if qtype == "unknown":
+                # Unknown/unmappable type - skip question with explicit source info
+                poss = q.get("possibility", {})
+                poss_type = poss.get("type", "") if poss else ""
+                raw_type = q.get("type", "")
+                type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
+                print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
+                skipped_count += 1
+                continue
             
             # Extract title and description
             title = q.get("title") or q.get("name", "")
@@ -127,45 +212,22 @@ def fetch_tournament_questions(contest_slug=None):
             
             # Handle multiple choice options
             if qtype == "multiple_choice":
-                # Try to get options from possibilities or options field
-                possibilities = q.get("possibilities", {})
-                options_data = possibilities.get("options") or q.get("options", [])
-                
-                # Normalize option format
-                options = []
-                if isinstance(options_data, list):
-                    for opt in options_data:
-                        if isinstance(opt, dict):
-                            options.append({"name": opt.get("name", opt.get("text", ""))})
-                        elif isinstance(opt, str):
-                            options.append({"name": opt})
-                normalized["options"] = options
+                options = extra.get("options", [])
+                normalized["options"] = [{"name": name} for name in options]
             else:
                 normalized["options"] = []
             
             # Handle numeric bounds
-            if qtype == "numeric":
-                # First try numerical_range (preferred)
-                numerical_range = q.get("numerical_range")
-                if numerical_range:
-                    min_val = numerical_range.get("min")
-                    max_val = numerical_range.get("max")
-                    if min_val is not None:
-                        normalized["min"] = float(min_val)
-                    if max_val is not None:
-                        normalized["max"] = float(max_val)
-                else:
-                    # Fallback to range_min/range_max
-                    if "range_min" in q:
-                        normalized["min"] = float(q["range_min"])
-                    if "range_max" in q:
-                        normalized["max"] = float(q["range_max"])
+            if qtype in ["numeric", "date"]:
+                numeric_bounds = extra.get("numeric_bounds", {})
+                if "min" in numeric_bounds:
+                    normalized["min"] = float(numeric_bounds["min"])
+                if "max" in numeric_bounds:
+                    normalized["max"] = float(numeric_bounds["max"])
             
             questions.append(normalized)
         
-        if skipped_count > 0:
-            print(f"[INFO] Skipped {skipped_count} questions with unsupported types")
-        print(f"[INFO] Normalized {len(questions)} questions for processing")
+        print(f"[INFO] Summary: Fetched {len(raw_questions)}, Normalized {len(questions)}, Skipped {skipped_count}")
         return questions
         
     except requests.exceptions.HTTPError as e:
