@@ -25,6 +25,35 @@ ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
 # ========== Tournament Question Fetcher ==========
+def _normalize_question_type(raw_type):
+    """
+    Normalize a question type string to canonical format.
+    
+    Args:
+        raw_type: Raw type string from Metaculus API
+    
+    Returns:
+        Canonical type ('binary', 'multiple_choice', 'numeric') or empty string if unmappable
+    """
+    if not raw_type:
+        return ""
+    
+    # Type normalization mapping
+    type_mapping = {
+        "binary": "binary",
+        "multiple_choice": "multiple_choice",
+        "multiplechoice": "multiple_choice",
+        "mc": "multiple_choice",
+        "numeric": "numeric",
+        "numerical": "numeric",
+        "continuous": "numeric",
+        "date": "numeric",  # dates can be treated as numeric
+    }
+    
+    # Normalize: lowercase and remove hyphens/underscores
+    normalized_key = raw_type.lower().replace("-", "").replace("_", "")
+    return type_mapping.get(normalized_key, "")
+
 def fetch_tournament_questions(contest_slug=None):
     """
     Fetch open questions from a Metaculus contest.
@@ -68,36 +97,18 @@ def fetch_tournament_questions(contest_slug=None):
             
             # Map question type - normalize to canonical set
             raw_type = q.get("type", "")
-            qtype = ""
+            qtype = _normalize_question_type(raw_type)
             
-            # Type normalization mapping
-            type_mapping = {
-                "binary": "binary",
-                "multiple_choice": "multiple_choice",
-                "multiplechoice": "multiple_choice",
-                "mc": "multiple_choice",
-                "numeric": "numeric",
-                "numerical": "numeric",
-                "continuous": "numeric",
-                "date": "numeric",  # dates can be treated as numeric
-            }
-            
-            # Normalize the raw type
-            normalized_type = type_mapping.get(raw_type.lower().replace("-", "").replace("_", ""), "")
-            
-            if normalized_type:
-                qtype = normalized_type
-            else:
+            if not qtype:
                 # Try to infer from possibilities if raw type not recognized
                 possibilities = q.get("possibilities", {})
                 poss_type = possibilities.get("type", "")
-                normalized_poss = type_mapping.get(poss_type.lower().replace("-", "").replace("_", ""), "")
+                qtype = _normalize_question_type(poss_type)
                 
-                if normalized_poss:
-                    qtype = normalized_poss
-                else:
-                    # Unknown/unmappable type - skip question
-                    print(f"[SKIP] Unsupported question type for Q{qid}: '{raw_type or poss_type or 'unknown'}'")
+                if not qtype:
+                    # Unknown/unmappable type - skip question with explicit source info
+                    type_source = raw_type if raw_type else (poss_type if poss_type else "unknown")
+                    print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
                     skipped_count += 1
                     continue
             
