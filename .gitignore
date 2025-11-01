@@ -2,6 +2,7 @@
 benchmarks/
 sandbox.py
 test_infer.py
+test_fetch.py
 
 
 ### General gitignore ###

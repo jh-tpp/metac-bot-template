@@ -112,8 +112,7 @@ def _infer_qtype_and_fields(q):
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
     elif poss_type == "date":
-        qtype = "date"
-        # Dates can be treated as numeric (timestamp)
+        qtype = "numeric"  # Dates are treated as numeric (timestamp)
         # Extract date bounds if present
         numeric_bounds = {}
         if "min" in possibility:
@@ -218,12 +217,20 @@ def fetch_tournament_questions(contest_slug=None):
                 normalized["options"] = []
             
             # Handle numeric bounds
-            if qtype in ["numeric", "date"]:
+            if qtype == "numeric":
                 numeric_bounds = extra.get("numeric_bounds", {})
                 if "min" in numeric_bounds:
-                    normalized["min"] = float(numeric_bounds["min"])
+                    try:
+                        normalized["min"] = float(numeric_bounds["min"])
+                    except (ValueError, TypeError):
+                        # For date strings, keep as-is (will be handled by downstream code)
+                        normalized["min"] = numeric_bounds["min"]
                 if "max" in numeric_bounds:
-                    normalized["max"] = float(numeric_bounds["max"])
+                    try:
+                        normalized["max"] = float(numeric_bounds["max"])
+                    except (ValueError, TypeError):
+                        # For date strings, keep as-is (will be handled by downstream code)
+                        normalized["max"] = numeric_bounds["max"]
             
             questions.append(normalized)
         
