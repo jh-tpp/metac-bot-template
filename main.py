@@ -64,7 +64,7 @@ def _infer_qtype_and_fields(q):
     
     Returns:
         Tuple (qtype, extra) where:
-        - qtype: str in {"binary", "numeric", "multiple_choice", "date", "unknown"}
+        - qtype: str in {"binary", "numeric", "multiple_choice", "unknown"}
         - extra: dict with optional keys:
             - "options": list[str] for multiple_choice
             - "numeric_bounds": dict with min, max, unit, scale for numeric
