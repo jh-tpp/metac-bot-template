@@ -254,27 +254,27 @@ def synthesize_rationale(question_text, world_summaries, aggregate_forecast, max
     
     # Format aggregate
     if "p" in aggregate_forecast:
-        agg_str = f"Binary probability: {{aggregate_forecast['p']:.2f}}"
+        agg_str = f"Binary probability: {aggregate_forecast['p']:.2f}"
     elif "probs" in aggregate_forecast:
         probs = aggregate_forecast["probs"]
-        agg_str = f"Multiple-choice probabilities: {{probs}}"
+        agg_str = f"Multiple-choice probabilities: {probs}"
     elif "cdf" in aggregate_forecast:
         p10 = aggregate_forecast.get("p10", "?")
         p50 = aggregate_forecast.get("p50", "?")
         p90 = aggregate_forecast.get("p90", "?")
-        agg_str = f"Numeric forecast (p10/p50/p90): {{p10}}/{{p50}}/{{p90}}"
+        agg_str = f"Numeric forecast (p10/p50/p90): {p10}/{p50}/{p90}"
     else:
         agg_str = "Forecast available"
     
     prompt = f"""
     You are a forecasting analyst. Given these Monte-Carlo world summaries and the aggregate forecast, produce 3-5 specific, evidence-based bullet points explaining the reasoning. Do NOT include boilerplate like \"will adjust later\" or \"subject to change\".
 
-    Question: {{question_text}}
+    Question: {question_text}
 
-    Aggregate Forecast: {{agg_str}}
+    Aggregate Forecast: {agg_str}
 
-    World Summaries (sample of {{len(summaries_subset)}}):
-    {{chr(10).join(f"- {{s}}" for s in summaries_subset)}}
+    World Summaries (sample of {len(summaries_subset)}):
+    {chr(10).join(f"- {s}" for s in summaries_subset)}
 
     Return JSON: {{"bullets": ["bullet1", "bullet2", ...]}}
     """
@@ -300,7 +300,7 @@ def validate_mc_result(question_obj, result):
         if p is None:
             return False, "Binary result missing 'p'"
         if not (0.01 <= p <= 0.99):
-            return False, f"Binary p={{p}} out of [0.01, 0.99]"
+            return False, f"Binary p={p} out of [0.01, 0.99]"
     
     elif "multiple" in qtype or "mc" in qtype:
         probs = result.get("probs")
@@ -313,11 +313,11 @@ def validate_mc_result(question_obj, result):
             return False, "Cannot infer k from question options"
         
         if len(probs) != k:
-            return False, f"MC probs length {{len(probs)}} != k={{k}}"
+            return False, f"MC probs length {len(probs)} != k={k}"
         
         total = sum(probs)
         if abs(total - 1.0) > 1e-6:
-            return False, f"MC probs sum to {{total}}, not 1.0"
+            return False, f"MC probs sum to {total}, not 1.0"
         
         if any(p < 0 or p > 1 for p in probs):
             return False, "MC probs contain values outside [0,1]"
@@ -329,7 +329,7 @@ def validate_mc_result(question_obj, result):
             return False, "Numeric result missing 'cdf' or 'grid'"
         
         if len(cdf) != len(grid):
-            return False, f"CDF length {{len(cdf)}} != grid length {{len(grid)}}"
+            return False, f"CDF length {len(cdf)} != grid length {len(grid)}"
         
         if any(c < 0 or c > 1 for c in cdf):
             return False, "CDF contains values outside [0,1]"
@@ -337,7 +337,7 @@ def validate_mc_result(question_obj, result):
         # Check monotone
         for i in range(1, len(cdf)):
             if cdf[i] < cdf[i-1]:
-                return False, f"CDF not monotone at index {{i}}"
+                return False, f"CDF not monotone at index {i}"
     
     return True, ""
 
@@ -357,32 +357,32 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     """
     qid = question_obj.get("id")
     if skip_set and qid in skip_set:
-        print(f"[SKIP] Question {{qid}} already forecasted (dedupe).")
+        print(f"[SKIP] Question {qid} already forecasted (dedupe).")
         return False
     
     if question_obj.get("resolution") is not None:
-        print(f"[SKIP] Question {{qid}} already resolved.")
+        print(f"[SKIP] Question {qid} already resolved.")
         return False
     
     valid, err = validate_mc_result(question_obj, mc_result)
     if not valid:
-        print(f"[ERROR] Validation failed for Q{{qid}}: {{err}}")
+        print(f"[ERROR] Validation failed for Q{qid}: {err}")
         return False
     
     payload = mc_results_to_metaculus_payload(question_obj, mc_result)
     
     if not publish:
-        print(f"[DRYRUN] Would post to Q{{qid}}: {{payload}}")
+        print(f"[DRYRUN] Would post to Q{qid}: {payload}")
         return True
     
     try:
         submit_forecast(qid, payload, METACULUS_TOKEN)
-        print(f"[SUCCESS] Posted forecast for Q{{qid}}")
+        print(f"[SUCCESS] Posted forecast for Q{qid}")
         if skip_set is not None:
             skip_set.add(qid)
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to post Q{{qid}}: {{e}}")
+        print(f"[ERROR] Failed to post Q{qid}: {e}")
         return False
 
 # ========== Test Mode ==========
@@ -434,12 +434,12 @@ def run_test_mode():
         qid = q["id"]
         facts = news.get(qid, [])
         
-        print(f"\n[INFO] Processing Q{{qid}}: {{q['title']}}")
-        print(f"  AskNews facts: {{len(facts)}}")
+        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
+        print(f"  AskNews facts: {len(facts)}")
         
         # Build context
-        context = f"Question: {{q['title']}}\n\nDescription: {{q['description']}}\n\n"
-        context += "Recent News:\n" + "\n".join(f"- {{f}}" for f in facts)
+        context = f"Question: {q['title']}\n\nDescription: {q['description']}\n\n"
+        context += "Recent News:\n" + "\n".join(f"- {f}" for f in facts)
         
         # Run MC
         mc_out = run_mc_worlds(
@@ -461,9 +461,9 @@ def run_test_mode():
             "forecast": mc_out
         })
         
-        all_reasons.append(f"Q{{qid}}: {{q['title']}}")
+        all_reasons.append(f"Q{qid}: {q['title']}")
         for b in bullets:
-            all_reasons.append(f"  • {{b}}")
+            all_reasons.append(f"  • {b}")
         all_reasons.append("")
     
     # Write artifacts
@@ -480,7 +480,7 @@ def run_tournament(mode="dryrun", publish=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
     """
-    print(f"[TOURNAMENT MODE: {{mode}}] Starting...")
+    print(f"[TOURNAMENT MODE: {mode}] Starting...")
     
     # TODO: fetch questions from Metaculus tournament API
     # For now, placeholder
@@ -513,7 +513,7 @@ def run_tournament(mode="dryrun", publish=False):
         
         post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
     
-    print(f"[TOURNAMENT MODE: {{mode}}] Complete.")
+    print(f"[TOURNAMENT MODE: {mode}] Complete.")
 
 # ========== Main CLI ==========
 def main():
