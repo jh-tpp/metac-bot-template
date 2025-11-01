@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import logging
 import os, json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Literal, List, Dict
 
 from forecasting_tools import (
@@ -25,6 +25,89 @@ from forecasting_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+# --- AskNews cache (tiny JSON file, 12h TTL) ---
+NEWS_CACHE_PATH = "cache/news_cache.json"
+NEWS_TTL_HOURS = 12
+pathlib.Path("cache").mkdir(exist_ok=True, parents=True)
+
+def _load_news_cache() -> dict:
+    try:
+        import json, io
+        with io.open(NEWS_CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_news_cache(cache: dict) -> None:
+    import json, io
+    with io.open(NEWS_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+def _now_ts() -> float:
+    return time.time()
+
+def _fresh(entry: dict) -> bool:
+    if not entry or "ts" not in entry: 
+        return False
+    age_h = (_now_ts() - float(entry["ts"])) / 3600.0
+    return age_h < NEWS_TTL_HOURS
+
+def fetch_facts_for_batch(qid_to_text: dict, max_per_q: int = 8) -> dict:
+    """
+    Returns {qid: [ 'YYYY-MM-DD: headline (url)', ... ]}.
+    Uses AskNews if available; caches to cache/news_cache.json; 12h TTL.
+    Falls back to a single base-rate note if nothing found.
+    """
+    cache = _load_news_cache()
+    out = {}
+    # Try to construct AskNewsSearcher if creds exist
+    searcher = None
+    try:
+        cid = os.environ.get("ASKNEWS_CLIENT_ID")
+        sec = os.environ.get("ASKNEWS_SECRET")
+        if cid and sec:
+            from forecasting_tools import AskNewsSearcher
+            searcher = AskNewsSearcher(client_id=cid, client_secret=sec)
+    except Exception as e:
+        print(f"[NEWS][WARN] Could not init AskNewsSearcher: {e}")
+
+    for qid, qtext in qid_to_text.items():
+        if _fresh(cache.get(qid)):
+            out[qid] = cache[qid]["facts"][:max_per_q]
+            continue
+
+        facts = []
+        if searcher:
+            try:
+                # Be defensive about method name differences across template versions
+                results = None
+                for meth in ("search_news", "search", "news"):
+                    if hasattr(searcher, meth):
+                        fn = getattr(searcher, meth)
+                        # Prefer very recent first; keep calls cheap
+                        results = fn(qtext, hours_back=48, max_results=12)
+                        break
+                # Normalize a few common shapes
+                for r in (results or []):
+                    date_iso = (r.get("published_at") or r.get("published") or r.get("date") or
+                                datetime.now(timezone.utc).date().isoformat())
+                    title = r.get("title") or r.get("headline") or (r.get("summary") or "").split(".")[0]
+                    url = r.get("url") or r.get("link")
+                    if title:
+                        facts.append(f"{date_iso[:10]}: {title}" + (f" ({url})" if url else ""))
+            except Exception as e:
+                print(f"[NEWS][WARN] qid={qid}: {e}")
+
+        if not facts:
+            # Only if truly nothing found (or AskNews not available)
+            facts = [f"{datetime.utcnow().date().isoformat()}: no recent news extracted; use question text and base rates"]
+
+        cache[qid] = {"ts": _now_ts(), "facts": facts}
+        out[qid] = facts[:max_per_q]
+
+    _save_news_cache(cache)
+    return out
 
 # main.py (excerpt)
 from mc_worlds import run_mc_worlds
