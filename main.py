@@ -19,7 +19,7 @@ CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"  # or adjust
+OPENROUTER_MODEL = "openrouter/openai/gpt-4o-mini"  
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
