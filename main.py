@@ -90,7 +90,7 @@ def fetch_tournament_questions(contest_slug=None):
             
             # Skip unsupported types
             if not qtype:
-                print(f"[SKIP] Unsupported question type for Q{qid}: '{raw_type}'")
+                print(f"[SKIP] Unsupported question type for Q{qid}: original type '{raw_type}'")
                 skipped_count += 1
                 continue
             
@@ -635,6 +635,8 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     qtype = question_obj.get("type", "").lower()
     
     # Defensive guard: check for supported types before proceeding
+    # Note: 'continuous' is normalized to 'numeric' in fetch_tournament_questions,
+    # but we keep it here for backwards compatibility with any existing data
     supported_types = ["binary", "multiple_choice", "numeric", "continuous"]
     if qtype not in supported_types:
         print(f"[SKIP] Skipping post for Q{qid}: unsupported type '{qtype}'")
