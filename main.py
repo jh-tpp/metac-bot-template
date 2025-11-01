@@ -59,24 +59,47 @@ def fetch_tournament_questions(contest_slug=None):
         
         # Normalize to pipeline format
         questions = []
+        skipped_count = 0
+        
         for q in raw_questions:
             qid = q.get("id")
             if not qid:
                 continue
             
-            # Map question type
-            qtype = q.get("type", "")
-            if not qtype:
-                # Try to infer from possibilities
+            # Map question type - normalize to canonical set
+            raw_type = q.get("type", "")
+            qtype = ""
+            
+            # Type normalization mapping
+            type_mapping = {
+                "binary": "binary",
+                "multiple_choice": "multiple_choice",
+                "multiplechoice": "multiple_choice",
+                "mc": "multiple_choice",
+                "numeric": "numeric",
+                "numerical": "numeric",
+                "continuous": "numeric",
+                "date": "numeric",  # dates can be treated as numeric
+            }
+            
+            # Normalize the raw type
+            normalized_type = type_mapping.get(raw_type.lower().replace("-", "").replace("_", ""), "")
+            
+            if normalized_type:
+                qtype = normalized_type
+            else:
+                # Try to infer from possibilities if raw type not recognized
                 possibilities = q.get("possibilities", {})
-                if possibilities.get("type") == "binary":
-                    qtype = "binary"
-                elif possibilities.get("type") == "multiple_choice":
-                    qtype = "multiple_choice"
-                elif possibilities.get("type") == "numeric":
-                    qtype = "numeric"
+                poss_type = possibilities.get("type", "")
+                normalized_poss = type_mapping.get(poss_type.lower().replace("-", "").replace("_", ""), "")
+                
+                if normalized_poss:
+                    qtype = normalized_poss
                 else:
-                    qtype = "unknown"
+                    # Unknown/unmappable type - skip question
+                    print(f"[SKIP] Unsupported question type for Q{qid}: '{raw_type or poss_type or 'unknown'}'")
+                    skipped_count += 1
+                    continue
             
             # Extract title and description
             title = q.get("title") or q.get("name", "")
@@ -110,7 +133,7 @@ def fetch_tournament_questions(contest_slug=None):
                 normalized["options"] = []
             
             # Handle numeric bounds
-            if qtype == "numeric" or qtype == "continuous":
+            if qtype == "numeric":
                 # First try numerical_range (preferred)
                 numerical_range = q.get("numerical_range")
                 if numerical_range:
@@ -129,6 +152,8 @@ def fetch_tournament_questions(contest_slug=None):
             
             questions.append(normalized)
         
+        if skipped_count > 0:
+            print(f"[INFO] Skipped {skipped_count} questions with unsupported types")
         print(f"[INFO] Normalized {len(questions)} questions for processing")
         return questions
         
@@ -227,7 +252,7 @@ def fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q):
 
 def _get_asknews_token():
     """
-    Acquire an OAuth token from AskNews using client credentials.
+    Acquire an OAuth token from AskNews using client credentials with HTTP Basic auth.
     Returns access_token string or None on failure.
     """
     if not ASKNEWS_CLIENT_ID or not ASKNEWS_SECRET:
@@ -236,15 +261,20 @@ def _get_asknews_token():
     try:
         token_url = "https://auth.asknews.app/oauth2/token"
         data = {
-            "client_id": ASKNEWS_CLIENT_ID,
-            "client_secret": ASKNEWS_SECRET,
             "grant_type": "client_credentials",
             "scope": "news"
         }
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
-        resp = requests.post(token_url, data=data, headers=headers, timeout=10)
+        # Use HTTP Basic auth (client_secret_basic) instead of client_secret_post
+        resp = requests.post(
+            token_url, 
+            data=data, 
+            auth=(ASKNEWS_CLIENT_ID, ASKNEWS_SECRET),
+            headers=headers, 
+            timeout=10
+        )
         resp.raise_for_status()
         body = resp.json()
         token = body.get("access_token")
@@ -618,6 +648,13 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
     
     if question_obj.get("resolution") is not None:
         print(f"[SKIP] Question {qid} already resolved.")
+        return False
+    
+    # Defensive skip: verify question type is supported before processing
+    qtype = question_obj.get("type", "").lower()
+    supported_types = ["binary", "multiple_choice", "numeric"]
+    if qtype not in supported_types:
+        print(f"[SKIP] Skipping post for Q{qid}: unsupported type '{qtype}'")
         return False
     
     valid, err = validate_mc_result(question_obj, mc_result)
