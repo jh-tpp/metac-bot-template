@@ -56,8 +56,11 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         try:
             # Build prompt with context
             prompt = WORLD_PROMPT + f"\n\nContext (recent news):\n"
+            # Include top-k facts (k<=5) to reduce generic summaries, truncate to avoid token bloat
             for fact in context_facts[:5]:  # cap at 5 to keep prompt short
-                prompt += f"- {fact}\n"
+                # Truncate long facts to ~200 chars
+                fact_truncated = fact if len(fact) <= 200 else fact[:197] + "..."
+                prompt += f"- {fact_truncated}\n"
             prompt += f"\nQuestion to consider: {question_obj['title']}\n"
             
             # For numeric questions, add bounds constraint to prompt
