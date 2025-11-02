@@ -1,0 +1,175 @@
+name: Submit Smoke Test (Single Question)
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_qid:
+        description: 'Metaculus question ID to test (non-AIB recommended)'
+        required: true
+        type: string
+      actually_submit:
+        description: 'Actually submit forecast to Metaculus'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+# Add concurrency group to prevent parallel runs
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  submit_smoke_test_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: .aib-test-state
+          key: aib-test-state-${{ github.run_number }}
+          restore-keys: |
+            aib-test-state-
+      
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      
+      - name: Check if question already posted
+        id: check_posted
+        run: |
+          mkdir -p .aib-test-state
+          
+          # Create empty posted_ids.json if doesn't exist
+          if [ ! -f .aib-test-state/posted_ids.json ]; then
+            echo "[]" > .aib-test-state/posted_ids.json
+          fi
+          
+          # Check if test_qid is in posted_ids.json
+          TEST_QID="${{ github.event.inputs.test_qid }}"
+          ACTUALLY_SUBMIT="${{ github.event.inputs.actually_submit }}"
+          
+          if [ "$ACTUALLY_SUBMIT" = "true" ]; then
+            ALREADY_POSTED=$(python3 - <<'PYEOF'
+          import json
+          import sys
+          
+          test_qid = int("${{ github.event.inputs.test_qid }}")
+          
+          try:
+              with open('.aib-test-state/posted_ids.json', 'r') as f:
+                  posted_ids = json.load(f)
+              
+              if test_qid in posted_ids:
+                  print("true")
+              else:
+                  print("false")
+          except Exception as e:
+              print(f"Error: {e}", file=sys.stderr)
+              print("false")
+          PYEOF
+          )
+            
+            echo "already_posted=$ALREADY_POSTED" >> $GITHUB_OUTPUT
+            
+            if [ "$ALREADY_POSTED" = "true" ]; then
+              echo "Warning: Question $TEST_QID was already posted in a previous run."
+              echo "Continuing anyway, but submission may fail or be rejected by Metaculus."
+            fi
+          else
+            echo "already_posted=false" >> $GITHUB_OUTPUT
+            echo "Dry-run mode: skipping posted check"
+          fi
+      
+      - name: Run submit smoke test
+        run: |
+          TEST_QID="${{ github.event.inputs.test_qid }}"
+          ACTUALLY_SUBMIT="${{ github.event.inputs.actually_submit }}"
+          
+          if [ "$ACTUALLY_SUBMIT" = "true" ]; then
+            PUBLISH_FLAG="True"
+          else
+            PUBLISH_FLAG="False"
+          fi
+          
+          poetry run python - <<PYEOF
+          from main import run_submit_smoke_test
+          run_submit_smoke_test(int("$TEST_QID"), publish=$PUBLISH_FLAG)
+          PYEOF
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      
+      - name: Update state cache
+        if: github.event.inputs.actually_submit == 'true'
+        run: |
+          # Check if posted_ids.json was created by the test
+          if [ -f posted_ids.json ]; then
+            # Merge posted_ids.json into .aib-test-state/posted_ids.json
+            python3 - <<'PYEOF'
+          import json
+          
+          # Load existing state
+          try:
+              with open('.aib-test-state/posted_ids.json', 'r') as f:
+                  state_ids = set(json.load(f))
+          except:
+              state_ids = set()
+          
+          # Load newly posted IDs
+          try:
+              with open('posted_ids.json', 'r') as f:
+                  new_posted = set(json.load(f))
+          except:
+              new_posted = set()
+          
+          # Merge
+          merged = list(state_ids | new_posted)
+          
+          # Save back
+          with open('.aib-test-state/posted_ids.json', 'w') as f:
+              json.dump(sorted(merged), f, indent=2)
+          
+          print(f"State updated: {len(merged)} total posted IDs")
+          PYEOF
+          else
+            echo "No posted_ids.json found, skipping state update"
+          fi
+      
+      - name: Upload MC results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-results
+          path: mc_results.json
+      
+      - name: Upload MC reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-reasons
+          path: mc_reasons.txt
+      
+      - name: Upload posted IDs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-ids
+          path: posted_ids.json

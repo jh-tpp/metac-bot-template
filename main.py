@@ -855,6 +855,260 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         print(f"[ERROR] Failed to post Q{qid}: {e}")
         return False
 
+# ========== Live Test & Smoke Test Helpers ==========
+def _hydrate_possibility(qid, timeout=20):
+    """
+    Fetch a single question from Metaculus API with possibility field.
+    
+    Args:
+        qid: Question ID
+        timeout: Request timeout in seconds
+    
+    Returns:
+        Question dict or None on failure
+    """
+    try:
+        url = f"{METACULUS_API_BASE}{qid}/?expand=possibility"
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch question {qid}: {e}")
+        return None
+
+def run_live_test():
+    """
+    Live test on three long-lived Metaculus questions (578, 14333, 22427).
+    Fetches questions, runs pipeline, writes artifacts. Never submits.
+    """
+    print("[LIVE TEST] Starting...")
+    
+    # Fetch three long-lived questions
+    test_qids = [578, 14333, 22427]  # binary, numeric, multiple_choice
+    raw_questions = []
+    
+    for qid in test_qids:
+        print(f"[INFO] Fetching question {qid}...")
+        q = _hydrate_possibility(qid, timeout=20)
+        if q:
+            raw_questions.append(q)
+        else:
+            print(f"[WARN] Could not fetch question {qid}, skipping")
+    
+    if not raw_questions:
+        print("[ERROR] No questions fetched. Aborting live test.")
+        return
+    
+    # Normalize questions
+    questions = []
+    for q in raw_questions:
+        qid = q.get("id")
+        if not qid:
+            continue
+        
+        qtype, extra = _infer_qtype_and_fields(q)
+        
+        if qtype == "unknown":
+            print(f"[SKIP] Unknown type for Q{qid}")
+            continue
+        
+        print(f"[INFO] Q{qid} inferred type: {qtype}")
+        
+        title = q.get("title") or q.get("name", "")
+        description = q.get("description", "")
+        
+        normalized = {
+            "id": qid,
+            "type": qtype,
+            "title": title,
+            "description": description,
+            "url": f"https://www.metaculus.com/questions/{qid}/"
+        }
+        
+        if qtype == "multiple_choice":
+            options = extra.get("options", [])
+            normalized["options"] = [{"name": name} for name in options]
+        else:
+            normalized["options"] = []
+        
+        if qtype == "numeric":
+            numeric_bounds = extra.get("numeric_bounds", {})
+            if "min" in numeric_bounds:
+                try:
+                    normalized["min"] = float(numeric_bounds["min"])
+                except (ValueError, TypeError):
+                    normalized["min"] = numeric_bounds["min"]
+            if "max" in numeric_bounds:
+                try:
+                    normalized["max"] = float(numeric_bounds["max"])
+                except (ValueError, TypeError):
+                    normalized["max"] = numeric_bounds["max"]
+        
+        questions.append(normalized)
+    
+    # Fetch AskNews facts
+    qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
+    news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
+    
+    # Run pipeline
+    all_results = []
+    all_reasons = []
+    
+    for q in questions:
+        qid = q["id"]
+        facts = news.get(qid, [])
+        
+        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
+        print(f"  Type: {q['type']}")
+        print(f"  AskNews facts: {len(facts)}")
+        
+        mc_out = run_mc_worlds(
+            question_obj=q,
+            context_facts=facts,
+            n_worlds=N_WORLDS_DEFAULT,
+            return_evidence=True
+        )
+        
+        world_summaries = mc_out.pop("world_summaries", [])
+        aggregate = mc_out
+        bullets = synthesize_rationale(q["title"], world_summaries, aggregate)
+        aggregate["reasoning"] = bullets
+        
+        all_results.append({
+            "question_id": qid,
+            "question_title": q["title"],
+            "forecast": aggregate
+        })
+        
+        all_reasons.append(f"Q{qid}: {q['title']}")
+        for b in bullets:
+            all_reasons.append(f"  • {b}")
+        all_reasons.append("")
+    
+    # Write artifacts
+    with open("mc_results.json", "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    
+    with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(all_reasons))
+    
+    print("\n[LIVE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+
+def run_submit_smoke_test(test_qid, publish=False):
+    """
+    Submit smoke test for a single question ID.
+    
+    Args:
+        test_qid: Metaculus question ID to test (int)
+        publish: If True, actually submit forecast; otherwise just dry-run
+    """
+    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...")
+    
+    # Fetch question
+    print(f"[INFO] Fetching question {test_qid}...")
+    q = _hydrate_possibility(test_qid, timeout=20)
+    
+    if not q:
+        print(f"[ERROR] Could not fetch question {test_qid}. Aborting.")
+        return
+    
+    # Normalize question
+    qid = q.get("id")
+    qtype, extra = _infer_qtype_and_fields(q)
+    
+    if qtype == "unknown":
+        print(f"[ERROR] Unknown question type for Q{qid}. Aborting.")
+        return
+    
+    print(f"[INFO] Q{qid} inferred type: {qtype}")
+    
+    title = q.get("title") or q.get("name", "")
+    description = q.get("description", "")
+    
+    normalized = {
+        "id": qid,
+        "type": qtype,
+        "title": title,
+        "description": description,
+        "url": f"https://www.metaculus.com/questions/{qid}/"
+    }
+    
+    if qtype == "multiple_choice":
+        options = extra.get("options", [])
+        normalized["options"] = [{"name": name} for name in options]
+    else:
+        normalized["options"] = []
+    
+    if qtype == "numeric":
+        numeric_bounds = extra.get("numeric_bounds", {})
+        if "min" in numeric_bounds:
+            try:
+                normalized["min"] = float(numeric_bounds["min"])
+            except (ValueError, TypeError):
+                normalized["min"] = numeric_bounds["min"]
+        if "max" in numeric_bounds:
+            try:
+                normalized["max"] = float(numeric_bounds["max"])
+            except (ValueError, TypeError):
+                normalized["max"] = numeric_bounds["max"]
+    
+    # Fetch AskNews facts
+    qid_to_text = {qid: title + " " + description}
+    news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
+    facts = news.get(qid, [])
+    
+    print(f"[INFO] Processing Q{qid}: {title}")
+    print(f"  Type: {qtype}")
+    print(f"  AskNews facts: {len(facts)}")
+    
+    # Run pipeline
+    mc_out = run_mc_worlds(
+        question_obj=normalized,
+        context_facts=facts,
+        n_worlds=N_WORLDS_DEFAULT,
+        return_evidence=True
+    )
+    
+    world_summaries = mc_out.pop("world_summaries", [])
+    aggregate = mc_out
+    bullets = synthesize_rationale(title, world_summaries, aggregate)
+    aggregate["reasoning"] = bullets
+    
+    # Write artifacts
+    result = {
+        "question_id": qid,
+        "question_title": title,
+        "forecast": aggregate
+    }
+    
+    with open("mc_results.json", "w", encoding="utf-8") as f:
+        json.dump([result], f, indent=2, ensure_ascii=False)
+    
+    reasons = [f"Q{qid}: {title}"]
+    for b in bullets:
+        reasons.append(f"  • {b}")
+    
+    with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(reasons))
+    
+    # Attempt submission if publish=True
+    if publish:
+        print(f"[INFO] Attempting to submit forecast for Q{qid}...")
+        success = post_forecast_safe(normalized, aggregate, publish=True)
+        
+        if success:
+            print(f"[SUCCESS] Posted forecast for Q{qid}")
+            with open("posted_ids.json", "w", encoding="utf-8") as f:
+                json.dump([qid], f, indent=2)
+            print("[INFO] Wrote posted_ids.json")
+        else:
+            print(f"[ERROR] Failed to post forecast for Q{qid}")
+    else:
+        print(f"[DRYRUN] Would post forecast for Q{qid}")
+    
+    print(f"[SUBMIT SMOKE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt" + 
+          (", posted_ids.json" if publish else ""))
+
 # ========== Test Mode ==========
 def run_test_mode():
     """
