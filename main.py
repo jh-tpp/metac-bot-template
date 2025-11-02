@@ -25,6 +25,11 @@ METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
+# Project-based tournament targeting (AIB Fall 2025)
+METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
+METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
+METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
+
 # ========== Tournament Question Fetcher ==========
 def _normalize_question_type(raw_type):
     """
@@ -159,24 +164,43 @@ def _infer_qtype_and_fields(q):
     
     return (qtype, extra)
 
-def fetch_tournament_questions(contest_slug=None):
+def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=None):
     """
-    Fetch open questions from a Metaculus contest.
+    Fetch open questions from a Metaculus project or contest.
     
     Args:
-        contest_slug: Contest slug to filter by (defaults to METACULUS_CONTEST_SLUG env or "fall-aib-2025")
+        contest_slug: Contest slug to filter by (legacy fallback)
+        project_id: Project ID to filter by (preferred, defaults to METACULUS_PROJECT_ID)
+        project_slug: Project slug to filter by (alternative, defaults to METACULUS_PROJECT_SLUG)
     
     Returns:
         List of question dicts normalized for pipeline
     """
     from typing import List, Dict, Any
     
+    # Prioritize project-based targeting with safe fallbacks
+    if project_id is None:
+        project_id = METACULUS_PROJECT_ID
+    if project_slug is None:
+        project_slug = METACULUS_PROJECT_SLUG
     if contest_slug is None:
-        contest_slug = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib-2025")
+        contest_slug = METACULUS_CONTEST_SLUG
     
     url = METACULUS_API_BASE
+    
+    # Try project ID first, then project slug, then contest slug fallback
+    if project_id:
+        filter_str = f"project:{project_id}"
+        filter_desc = f"project:{project_id}"
+    elif project_slug:
+        filter_str = f"project:{project_slug}"
+        filter_desc = f"project:{project_slug}"
+    else:
+        filter_str = f"contest:{contest_slug}"
+        filter_desc = f"contest:{contest_slug}"
+    
     params = {
-        "search": f"contest:{contest_slug}",
+        "search": filter_str,
         "status": "open",
         "limit": 1000,
         "order_by": "-activity",
@@ -185,7 +209,7 @@ def fetch_tournament_questions(contest_slug=None):
     }
     
     try:
-        print(f"[INFO] Fetching tournament questions for contest: {contest_slug}")
+        print(f"[INFO] Fetching tournament questions with filter: {filter_desc}")
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
@@ -934,6 +958,7 @@ def run_test_mode():
 def run_tournament(mode="dryrun", publish=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
+    Writes state files: open_ids.json (dryrun), posted_ids.json (submit).
     """
     print(f"[TOURNAMENT MODE: {mode}] Starting...")
     
@@ -944,12 +969,20 @@ def run_tournament(mode="dryrun", publish=False):
         print("[ERROR] No questions fetched. Check Metaculus API integration.")
         return
     
+    # Write open_ids.json in dryrun mode
+    open_ids = [q["id"] for q in questions]
+    if mode == "dryrun":
+        with open("open_ids.json", "w", encoding="utf-8") as f:
+            json.dump(open_ids, f, indent=2)
+        print(f"[INFO] Wrote {len(open_ids)} open question IDs to open_ids.json")
+    
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     
     skip_set = set()  # dedupe already-forecasted
     all_results = []
     all_reasons = []
+    posted_ids = []  # track successfully posted IDs for submit mode
     
     for q in questions:
         qid = q["id"]
@@ -981,7 +1014,15 @@ def run_tournament(mode="dryrun", publish=False):
             all_reasons.append(f"  • {b}")
         all_reasons.append("")
         
-        post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
+        success = post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
+        if success and publish:
+            posted_ids.append(qid)
+    
+    # Write posted_ids.json in submit mode
+    if mode == "submit" and publish:
+        with open("posted_ids.json", "w", encoding="utf-8") as f:
+            json.dump(posted_ids, f, indent=2)
+        print(f"[INFO] Wrote {len(posted_ids)} posted question IDs to posted_ids.json")
     
     # Write artifacts
     with open("mc_results.json", "w", encoding="utf-8") as f:

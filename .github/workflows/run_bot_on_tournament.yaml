@@ -3,12 +3,12 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/20 * * * *" # runs every 20 minutes. Make sure to skip already forecasted questions!
+    - cron: "*/10 * * * *" # runs every 10 minutes
 
 # Add concurrency group to prevent parallel runs
 concurrency:
   group: ${{ github.workflow }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 
 # Daily job to run the simple forecast bot
@@ -28,6 +28,16 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
           installer-parallel: true
+      
+      # Restore state cache for posted IDs
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: .aib-state
+          key: aib-state-${{ github.run_number }}
+          restore-keys: |
+            aib-state-
+      
       # Adding the below will make the workflow faster, but will mean you don't automatically get updates from forecasting-tools and other packages
       # - name: Load cached venv
       #   id: cached-poetry-dependencies
@@ -37,9 +47,12 @@ jobs:
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
-      - name: Run bot
+      
+      # Step 1: Dry run to discover open questions
+      - name: Run bot (dry run)
+        id: dryrun
         run: |
-          poetry run python main.py
+          poetry run python main.py --mode tournament_dryrun
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -51,3 +64,152 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          METACULUS_PROJECT_ID: ${{ vars.METACULUS_PROJECT_ID || '32813' }}
+          METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
+          METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
+      
+      # Step 2: Determine if we should submit (diff open_ids vs posted_ids)
+      - name: Check for new questions
+        id: check_new
+        run: |
+          mkdir -p .aib-state
+          
+          # Ensure open_ids.json exists
+          if [ ! -f open_ids.json ]; then
+            echo "Error: open_ids.json not found"
+            echo "should_submit=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Load open IDs
+          open_ids=$(cat open_ids.json)
+          
+          # Load posted IDs (create empty if doesn't exist)
+          if [ ! -f .aib-state/posted_ids.json ]; then
+            echo "[]" > .aib-state/posted_ids.json
+          fi
+          posted_ids=$(cat .aib-state/posted_ids.json)
+          
+          # Calculate new IDs using Python
+          new_ids=$(python3 - <<'PYEOF'
+          import json
+          import sys
+          
+          try:
+              with open('open_ids.json', 'r') as f:
+                  open_ids = set(json.load(f))
+              
+              with open('.aib-state/posted_ids.json', 'r') as f:
+                  posted_ids = set(json.load(f))
+              
+              new_ids = list(open_ids - posted_ids)
+              
+              with open('new_ids.json', 'w') as f:
+                  json.dump(new_ids, f, indent=2)
+              
+              print(f"Found {len(new_ids)} new question(s)", file=sys.stderr)
+              print(json.dumps(new_ids))
+              
+              if len(new_ids) > 0:
+                  sys.exit(0)
+              else:
+                  sys.exit(1)
+          except Exception as e:
+              print(f"Error: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
+          )
+          
+          if [ $? -eq 0 ]; then
+            echo "should_submit=true" >> $GITHUB_OUTPUT
+            echo "New questions found, will submit"
+          else
+            echo "should_submit=false" >> $GITHUB_OUTPUT
+            echo "No new questions, skipping submit"
+          fi
+      
+      # Step 3: Submit forecasts if new questions exist
+      - name: Run bot (submit)
+        if: steps.check_new.outputs.should_submit == 'true'
+        run: |
+          poetry run python main.py --mode tournament_submit
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          METACULUS_PROJECT_ID: ${{ vars.METACULUS_PROJECT_ID || '32813' }}
+          METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
+          METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
+      
+      # Step 4: Merge posted IDs and save state
+      - name: Update state cache
+        if: steps.check_new.outputs.should_submit == 'true'
+        run: |
+          # Merge posted_ids.json into .aib-state/posted_ids.json
+          python3 - <<'PYEOF'
+          import json
+          
+          # Load existing state
+          try:
+              with open('.aib-state/posted_ids.json', 'r') as f:
+                  state_ids = set(json.load(f))
+          except:
+              state_ids = set()
+          
+          # Load newly posted IDs
+          try:
+              with open('posted_ids.json', 'r') as f:
+                  new_posted = set(json.load(f))
+          except:
+              new_posted = set()
+          
+          # Merge
+          merged = list(state_ids | new_posted)
+          
+          # Save back
+          with open('.aib-state/posted_ids.json', 'w') as f:
+              json.dump(sorted(merged), f, indent=2)
+          
+          print(f"State updated: {len(merged)} total posted IDs")
+          PYEOF
+      
+      # Upload artifacts
+      - name: Upload MC results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-results
+          path: mc_results.json
+      
+      - name: Upload MC reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-reasons
+          path: mc_reasons.txt
+      
+      - name: Upload open IDs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-ids
+          path: open_ids.json
+      
+      - name: Upload posted IDs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-ids
+          path: posted_ids.json
+      
+      - name: Upload new IDs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-ids
+          path: new_ids.json
