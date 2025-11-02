@@ -164,7 +164,7 @@ def fetch_tournament_questions(contest_slug=None):
     Fetch open questions from a Metaculus contest.
     
     Args:
-        contest_slug: Contest slug to filter by (defaults to METACULUS_CONTEST_SLUG env or "fall-aib")
+        contest_slug: Contest slug to filter by (defaults to METACULUS_CONTEST_SLUG env or "fall-aib-2025")
     
     Returns:
         List of question dicts normalized for pipeline
@@ -172,7 +172,7 @@ def fetch_tournament_questions(contest_slug=None):
     from typing import List, Dict, Any
     
     if contest_slug is None:
-        contest_slug = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
+        contest_slug = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib-2025")
     
     url = METACULUS_API_BASE
     params = {
