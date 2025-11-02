@@ -188,7 +188,9 @@ def _normalize_question_object(raw):
         return None
     
     # Pivot into nested 'question' object if present (v2 API)
-    core = raw.get("question", raw) or {}
+    core = raw.get("question")
+    if core is None:
+        core = raw
     if not isinstance(core, dict):
         return None
     
