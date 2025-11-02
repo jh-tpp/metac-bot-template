@@ -21,6 +21,15 @@ CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 METACULUS_API_BASE = "https://www.metaculus.com/api2/questions/"
 
+# Retry configuration for HTTP requests
+RETRY_TOTAL = 3
+RETRY_BACKOFF_FACTOR = 0.5
+RETRY_STATUS_FORCELIST = [429, 500, 502, 503, 504]
+
+# Error detection keys
+ERROR_KEY_REQUEST = "_request_error"
+ERROR_KEY_PARSE = "_parse_error"
+
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
@@ -42,9 +51,9 @@ def _build_http_session():
     """
     session = requests.Session()
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=[429, 500, 502, 503, 504],
+        total=RETRY_TOTAL,
+        backoff_factor=RETRY_BACKOFF_FACTOR,
+        status_forcelist=RETRY_STATUS_FORCELIST,
         allowed_methods=["GET", "POST", "HEAD"]
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -107,8 +116,9 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
     _dprint(f"[REQUEST]")
     _dprint(f"  URL: {request_url}")
     _dprint(f"  Params: {request_params}")
-    # Safe headers (exclude Authorization)
-    safe_headers = {k: v for k, v in request_headers.items() if k.lower() != "authorization"}
+    # Safe headers allowlist (exclude all auth-related headers)
+    safe_header_keys = ["user-agent", "accept", "accept-encoding", "content-type", "connection"]
+    safe_headers = {k: v for k, v in request_headers.items() if k.lower() in safe_header_keys}
     _dprint(f"  Headers: {safe_headers}")
     
     # Response details
@@ -193,7 +203,7 @@ def _request_with_logging(sess, url, params, qid, label):
             parsed_obj = resp.json()
         except Exception as parse_err:
             _dprint(f"[ERROR] Failed to parse JSON for Q{qid} {label}: {parse_err}")
-            parsed_obj = {"_parse_error": str(parse_err), "_raw_snippet": raw_text[:500]}
+            parsed_obj = {ERROR_KEY_PARSE: str(parse_err), "_raw_snippet": raw_text[:500]}
         
         # Log comprehensive diagnostics
         _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params, sess.headers)
@@ -206,7 +216,7 @@ def _request_with_logging(sess, url, params, qid, label):
         
     except requests.exceptions.RequestException as e:
         _dprint(f"[ERROR] Request failed for Q{qid} {label}: {e}")
-        error_dict = {"_request_error": str(e), "id": qid}
+        error_dict = {ERROR_KEY_REQUEST: str(e), "id": qid}
         
         # Try to get response details if available
         if hasattr(e, "response") and e.response is not None:
@@ -284,7 +294,7 @@ def _hydrate_single_question(sess, qid):
     merged = {"id": qid}
     
     for i, result in enumerate(results):
-        if isinstance(result, dict) and not result.get("_request_error") and not result.get("_parse_error"):
+        if isinstance(result, dict) and not result.get(ERROR_KEY_REQUEST) and not result.get(ERROR_KEY_PARSE):
             # Valid result, merge fields
             for key, value in result.items():
                 if key not in merged or merged.get(key) is None or (key == "possibility" and value):
@@ -303,7 +313,8 @@ def _hydrate_single_question(sess, qid):
     
     # Write final merged result
     prefix = f"debug_q_{qid}_final"
-    _write_debug_files(prefix, json.dumps(merged, indent=2, ensure_ascii=False), merged)
+    merged_json = json.dumps(merged, indent=2, ensure_ascii=False)
+    _write_debug_files(prefix, merged_json, merged)
     
     _dprint(f"[HYDRATE] Completed multi-attempt hydration for Q{qid}\n")
     
@@ -1359,14 +1370,15 @@ def run_submit_smoke_test(test_qid, publish=False):
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
     """
-    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...")
+    _dprint(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...")
     
-    # Fetch question
-    print(f"[INFO] Fetching question {test_qid}...")
-    q = _hydrate_possibility(test_qid, timeout=20)
+    # Create session and fetch question with multi-attempt hydration
+    _dprint(f"[INFO] Fetching question {test_qid}...")
+    sess = _build_http_session()
+    q = _hydrate_single_question(sess, test_qid)
     
-    if not q:
-        print(f"[ERROR] Could not fetch question {test_qid}. Aborting.")
+    if not q or not q.get("id"):
+        _dprint(f"[ERROR] Could not fetch question {test_qid}. Aborting.")
         return
     
     # Normalize question
@@ -1374,10 +1386,10 @@ def run_submit_smoke_test(test_qid, publish=False):
     qtype, extra = _infer_qtype_and_fields(q)
     
     if qtype == "unknown":
-        print(f"[ERROR] Unknown question type for Q{qid}. Aborting.")
+        _dprint(f"[ERROR] Unknown question type for Q{qid}. Aborting.")
         return
     
-    print(f"[INFO] Q{qid} inferred type: {qtype}")
+    _dprint(f"[INFO] Q{qid} inferred type: {qtype}")
     
     title = q.get("title") or q.get("name", "")
     description = q.get("description", "")
@@ -1414,9 +1426,9 @@ def run_submit_smoke_test(test_qid, publish=False):
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     facts = news.get(qid, [])
     
-    print(f"[INFO] Processing Q{qid}: {title}")
-    print(f"  Type: {qtype}")
-    print(f"  AskNews facts: {len(facts)}")
+    _dprint(f"[INFO] Processing Q{qid}: {title}")
+    _dprint(f"  Type: {qtype}")
+    _dprint(f"  AskNews facts: {len(facts)}")
     
     # Run pipeline
     mc_out = run_mc_worlds(
@@ -1450,20 +1462,20 @@ def run_submit_smoke_test(test_qid, publish=False):
     
     # Attempt submission if publish=True
     if publish:
-        print(f"[INFO] Attempting to submit forecast for Q{qid}...")
+        _dprint(f"[INFO] Attempting to submit forecast for Q{qid}...")
         success = post_forecast_safe(normalized, aggregate, publish=True)
         
         if success:
-            print(f"[SUCCESS] Posted forecast for Q{qid}")
+            _dprint(f"[SUCCESS] Posted forecast for Q{qid}")
             with open("posted_ids.json", "w", encoding="utf-8") as f:
                 json.dump([qid], f, indent=2)
-            print("[INFO] Wrote posted_ids.json")
+            _dprint("[INFO] Wrote posted_ids.json")
         else:
-            print(f"[ERROR] Failed to post forecast for Q{qid}")
+            _dprint(f"[ERROR] Failed to post forecast for Q{qid}")
     else:
-        print(f"[DRYRUN] Would post forecast for Q{qid}")
+        _dprint(f"[DRYRUN] Would post forecast for Q{qid}")
     
-    print(f"[SUBMIT SMOKE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt" + 
+    _dprint(f"[SUBMIT SMOKE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt" + 
           (", posted_ids.json" if publish else ""))
 
 # ========== Test Mode ==========
