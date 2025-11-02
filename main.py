@@ -107,9 +107,12 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
             print(f"  Core (nested question) keys: {list(core.keys())}", flush=True)
         
         # Check for possibility/possibilities in core
+        detected_type = ""
+        
         if "possibility" in core:
             poss = core["possibility"]
             poss_type = poss.get("type", "N/A") if isinstance(poss, dict) else "N/A"
+            detected_type = poss_type
             print(f"  core.possibility present: type={poss_type}", flush=True)
             if isinstance(poss, dict):
                 print(f"  core.possibility keys: {list(poss.keys())}", flush=True)
@@ -119,10 +122,19 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
         if "possibilities" in core:
             poss_list = core["possibilities"]
             print(f"  core.possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
-            if isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
+            if isinstance(poss_list, dict):
+                detected_type = poss_list.get("type", "N/A")
+                print(f"  core.possibilities.type: {detected_type}", flush=True)
+                print(f"  core.possibilities keys: {list(poss_list.keys())}", flush=True)
+            elif isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
+                detected_type = poss_list[0].get("type", "N/A")
+                print(f"  core.possibilities[0].type: {detected_type}", flush=True)
                 print(f"  core.possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
         else:
             print(f"  core.possibilities: NOT PRESENT", flush=True)
+        
+        if detected_type:
+            print(f"  Detected possibilities.type from core: {detected_type}", flush=True)
         
         # Check for fallback type fields in core
         fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
@@ -179,6 +191,157 @@ def _normalize_question_type(raw_type):
     # Normalize: lowercase and remove hyphens/underscores
     normalized_key = raw_type.lower().replace("-", "").replace("_", "")
     return type_mapping.get(normalized_key, "")
+
+def _normalize_question_object(raw):
+    """
+    Normalize a question object from Metaculus API v2.
+    Always pivots into nested 'question' object when present and extracts type/options/bounds.
+    
+    Args:
+        raw: Question dict from Metaculus API (may be top-level or nested under 'question')
+    
+    Returns:
+        Normalized dict with keys: id, title, description, type, options, bounds, raw
+        Or None if nothing actionable (no ID or unmappable type)
+    """
+    if not raw:
+        return None
+    
+    # Pivot into core question object
+    # Handle case where question key exists but might be None or empty
+    if "question" in raw and raw["question"]:
+        core = raw["question"]
+    else:
+        core = raw
+    
+    if not core:
+        return None
+    
+    # Extract basic fields with fallback to raw
+    qid = core.get("id") or raw.get("id")
+    if not qid:
+        return None
+    
+    title = core.get("title") or raw.get("title") or ""
+    description = core.get("description") or raw.get("description") or ""
+    
+    # Get possibilities/possibility from core (defensive for both singular/plural)
+    poss = core.get("possibilities") or core.get("possibility") or {}
+    
+    # Determine type from possibilities/possibility
+    ptype = ""
+    if isinstance(poss, dict):
+        ptype = (poss.get("type") or "").strip().lower()
+    elif isinstance(poss, list) and len(poss) > 0 and isinstance(poss[0], dict):
+        ptype = (poss[0].get("type") or "").strip().lower()
+    
+    # Fallback to core.type if ptype not found
+    if not ptype:
+        ptype = (core.get("type") or "").strip().lower()
+    
+    # Map types per Metaculus v2 semantics
+    qtype = None
+    options = []
+    bounds = {}
+    
+    if ptype in ["binary", "bool", "boolean"]:
+        qtype = "binary"
+    
+    elif ptype in ["discrete"]:
+        # discrete → multiple_choice
+        qtype = "multiple_choice"
+        
+        # Extract option names from poss.outcomes[].name|label or core.options
+        # Try poss.outcomes
+        if isinstance(poss, dict) and "outcomes" in poss:
+            outcomes = poss["outcomes"]
+            if isinstance(outcomes, list):
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        name = outcome.get("name") or outcome.get("label") or ""
+                        if name:
+                            options.append(name)
+        
+        # Fallback to core.options
+        if not options and "options" in core:
+            options_data = core["options"]
+            if isinstance(options_data, list):
+                for opt in options_data:
+                    if isinstance(opt, dict):
+                        name = opt.get("name") or opt.get("label") or opt.get("title") or ""
+                        if name:
+                            options.append(name)
+                    elif isinstance(opt, str):
+                        options.append(opt)
+    
+    elif ptype in ["continuous"]:
+        # continuous → numeric
+        qtype = "numeric"
+        
+        # Extract bounds from poss.range or poss.min/max
+        if isinstance(poss, dict):
+            # Try poss.range
+            if "range" in poss:
+                poss_range = poss["range"]
+                if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                    bounds["min"] = poss_range[0]
+                    bounds["max"] = poss_range[1]
+            # Try poss.min/max
+            if not bounds:
+                if "min" in poss:
+                    bounds["min"] = poss["min"]
+                if "max" in poss:
+                    bounds["max"] = poss["max"]
+            
+            # Extract unit and scale
+            if "unit" in poss:
+                bounds["unit"] = poss["unit"]
+            if "scale" in poss:
+                bounds["scale"] = poss["scale"]
+    
+    else:
+        # Fallback inference: check for outcomes or range/min/max
+        # If outcomes present → multiple_choice
+        if isinstance(poss, dict) and "outcomes" in poss:
+            outcomes = poss["outcomes"]
+            if isinstance(outcomes, list) and len(outcomes) > 0:
+                qtype = "multiple_choice"
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        name = outcome.get("name") or outcome.get("label") or ""
+                        if name:
+                            options.append(name)
+        
+        # Elif range/min/max present → numeric
+        elif isinstance(poss, dict) and ("range" in poss or "min" in poss or "max" in poss):
+            qtype = "numeric"
+            if "range" in poss:
+                poss_range = poss["range"]
+                if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                    bounds["min"] = poss_range[0]
+                    bounds["max"] = poss_range[1]
+            if not bounds:
+                if "min" in poss:
+                    bounds["min"] = poss["min"]
+                if "max" in poss:
+                    bounds["max"] = poss["max"]
+    
+    # If type is still not determined, return None (unknown/unmappable)
+    if not qtype:
+        return None
+    
+    # Build normalized question
+    normalized = {
+        "id": qid,
+        "title": title,
+        "description": description,
+        "type": qtype,
+        "options": options,
+        "bounds": bounds,
+        "raw": raw
+    }
+    
+    return normalized
 
 def _infer_qtype_and_fields(q):
     """
@@ -374,9 +537,8 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
         "search": filter_str,
         "status": "open",
         "limit": 1000,
-        "order_by": "-activity",
-        "expand": "possibility",
-        "fields": "id,title,description,possibility"
+        "order_by": "-activity"
+        # Remove expand and fields - detail endpoint already returns complete question object
     }
     
     try:
@@ -1081,28 +1243,12 @@ def _hydrate_question_with_diagnostics(qid):
     # Try multiple variants in order
     attempts = [
         {
-            "label": "attempt 1: with trailing slash, expand=possibility, fields",
-            "url": f"{METACULUS_API_BASE}{qid}/",
-            "params": {
-                "expand": "possibility",
-                "fields": "id,title,description,type,possibility,options"
-            }
-        },
-        {
-            "label": "attempt 2: with trailing slash, plain detail",
+            "label": "attempt 1: with trailing slash, plain detail (preferred)",
             "url": f"{METACULUS_API_BASE}{qid}/",
             "params": {}
         },
         {
-            "label": "attempt 3: no trailing slash, expand=possibility, fields",
-            "url": f"{METACULUS_API_BASE}{qid}",
-            "params": {
-                "expand": "possibility",
-                "fields": "id,title,description,type,possibility,options"
-            }
-        },
-        {
-            "label": "attempt 4: no trailing slash, plain detail",
+            "label": "attempt 2: no trailing slash, plain detail",
             "url": f"{METACULUS_API_BASE}{qid}",
             "params": {}
         }
@@ -1182,6 +1328,19 @@ def _hydrate_question_with_diagnostics(qid):
                 json.dump(merged_data, f, indent=2, ensure_ascii=False)
             print(f"[HYDRATE] Q{qid} - Wrote final merged object to {final_file}", flush=True)
             print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(merged_data.keys())}", flush=True)
+            
+            # Normalize the merged object and write normalized version
+            normalized = _normalize_question_object(merged_data)
+            if normalized:
+                normalized_file = f"{final_prefix}_normalized.json"
+                with open(normalized_file, "w", encoding="utf-8") as f:
+                    # Don't include raw in the output file
+                    output = {k: v for k, v in normalized.items() if k != "raw"}
+                    json.dump(output, f, indent=2, ensure_ascii=False)
+                print(f"[HYDRATE] Q{qid} - Wrote normalized object to {normalized_file}", flush=True)
+                print(f"[HYDRATE] Q{qid} - Normalized type: {normalized.get('type')}", flush=True)
+            else:
+                print(f"[HYDRATE] Q{qid} - Could not normalize merged object (unknown type)", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to write final merged object for Q{qid}: {e}", flush=True)
             traceback.print_exc()
