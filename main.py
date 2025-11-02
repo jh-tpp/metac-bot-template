@@ -36,6 +36,9 @@ BINARY_TYPE_VARIANTS = ["binary", "bool", "boolean"]
 MULTIPLE_CHOICE_TYPE_VARIANTS = ["one_of", "categorical", "multiple_choice", "multiplechoice", "mc"]
 NUMERIC_TYPE_VARIANTS = ["continuous", "float", "integer", "number", "numeric", "linear", "log", "date", "discrete"]
 
+# Safe headers for logging (allowlist approach)
+SAFE_HEADER_KEYS = ["user-agent", "accept", "accept-encoding", "content-type", "connection"]
+
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
@@ -123,8 +126,7 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
     _dprint(f"  URL: {request_url}")
     _dprint(f"  Params: {request_params}")
     # Safe headers allowlist (exclude all auth-related headers)
-    safe_header_keys = ["user-agent", "accept", "accept-encoding", "content-type", "connection"]
-    safe_headers = {k: v for k, v in request_headers.items() if k.lower() in safe_header_keys}
+    safe_headers = {k: v for k, v in request_headers.items() if k.lower() in SAFE_HEADER_KEYS}
     _dprint(f"  Headers: {safe_headers}")
     
     # Response details
@@ -318,6 +320,7 @@ def _hydrate_single_question(sess, qid):
                 _dprint(f"[HYDRATE] Q{qid} - Merged possibility.type: {repr(poss['type'])}")
     
     # Write final merged result
+    # Note: merged_json is the formatted string for raw.txt, merged is the dict for .json
     prefix = f"debug_q_{qid}_final"
     merged_json = json.dumps(merged, indent=2)
     _write_debug_files(prefix, merged_json, merged)
@@ -399,8 +402,8 @@ def _infer_qtype_and_fields(q):
         if poss_type:
             candidates_tried.append(f"type={repr(poss_type)}")
     
-    # Priority 4+: legacy/fallback fields
-    for field in FALLBACK_TYPE_FIELDS[1:]:  # Skip "type" as we already checked it
+    # Priority 4+: legacy/fallback fields (skip first as it's "type" which we already checked)
+    for field in FALLBACK_TYPE_FIELDS[1:]:
         if not poss_type:
             poss_type = q.get(field, "").lower()
             if poss_type:
@@ -1354,7 +1357,7 @@ def run_live_test():
     
     # Write artifacts
     with open("mc_results.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+        json.dump(all_results, f, indent=2)
     _dprint("[LIVE TEST] Wrote mc_results.json")
     
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
