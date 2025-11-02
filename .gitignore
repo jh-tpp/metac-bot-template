@@ -4,6 +4,15 @@ sandbox.py
 test_infer.py
 test_fetch.py
 
+# Debug artifacts from live tests
+debug_q_*.json
+debug_q_*_raw.txt
+mc_results.json
+mc_reasons.txt
+open_ids.json
+posted_ids.json
+cache/
+
 
 ### General gitignore ###
 
