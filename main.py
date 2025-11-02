@@ -17,6 +17,7 @@ ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
 CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
+METACULUS_API_BASE = "https://www.metaculus.com/api2/questions/"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
@@ -57,7 +58,7 @@ def _normalize_question_type(raw_type):
 def _infer_qtype_and_fields(q):
     """
     Infer question type and extract relevant fields from Metaculus API2 question object.
-    Inspects q.get("possibility") and falls back to q.get("type") for test stubs.
+    Inspects q.get("possibility") and falls back to legacy keys for test stubs.
     
     Args:
         q: Question dict from Metaculus API2
@@ -75,13 +76,19 @@ def _infer_qtype_and_fields(q):
     possibility = q.get("possibility", {})
     poss_type = possibility.get("type", "").lower() if possibility else ""
     
-    # Fallback to top-level type for test stubs
-    fallback_type = q.get("type", "").lower()
+    # Fallback to legacy keys for test stubs
+    if not poss_type:
+        poss_type = q.get("possibility_type", "").lower()
+    if not poss_type:
+        poss_type = q.get("prediction_type", "").lower()
+    if not poss_type:
+        poss_type = q.get("type", "").lower()
     
     # Normalize possibility.type values to canonical types
-    # Handle common possibility.type values
-    if poss_type in ["binary", "bool"]:
+    # Binary types
+    if poss_type in ["binary", "bool", "boolean"]:
         qtype = "binary"
+    # Multiple choice types
     elif poss_type in ["one_of", "categorical", "multiple_choice"]:
         qtype = "multiple_choice"
         # Extract options
@@ -97,20 +104,45 @@ def _infer_qtype_and_fields(q):
             else:
                 options.append(f"opt_{i}")
         extra["options"] = options
-    elif poss_type in ["continuous", "float", "integer", "number"]:
+    # Numeric types (continuous, float, integer, number, linear, log, numeric)
+    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log"]:
         qtype = "numeric"
-        # Extract numeric bounds
+        # Extract numeric bounds - try multiple field names
         numeric_bounds = {}
-        if "min" in possibility:
-            numeric_bounds["min"] = possibility["min"]
-        if "max" in possibility:
-            numeric_bounds["max"] = possibility["max"]
+        
+        # Try possibility.range first
+        if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
+            numeric_bounds["min"] = possibility["range"][0]
+            numeric_bounds["max"] = possibility["range"][1]
+        # Try possibility.bounds
+        elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
+            numeric_bounds["min"] = possibility["bounds"][0]
+            numeric_bounds["max"] = possibility["bounds"][1]
+        # Try direct min/max in possibility
+        else:
+            if "min" in possibility:
+                numeric_bounds["min"] = possibility["min"]
+            if "max" in possibility:
+                numeric_bounds["max"] = possibility["max"]
+        
+        # Fallback to legacy keys at top level
+        if not numeric_bounds:
+            if "numerical_range" in q and isinstance(q["numerical_range"], (list, tuple)) and len(q["numerical_range"]) >= 2:
+                numeric_bounds["min"] = q["numerical_range"][0]
+                numeric_bounds["max"] = q["numerical_range"][1]
+            elif "range_min" in q and "range_max" in q:
+                numeric_bounds["min"] = q["range_min"]
+                numeric_bounds["max"] = q["range_max"]
+        
+        # Extract unit and scale
         if "unit" in possibility:
             numeric_bounds["unit"] = possibility["unit"]
         if "scale" in possibility:
             numeric_bounds["scale"] = possibility["scale"]
+        
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
+    # Date types (treated as numeric)
     elif poss_type == "date":
         qtype = "numeric"  # Dates are treated as numeric (timestamp)
         # Extract date bounds if present
@@ -121,14 +153,8 @@ def _infer_qtype_and_fields(q):
             numeric_bounds["max"] = possibility["max"]
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
-    elif fallback_type:
-        # Use fallback type if possibility.type not recognized
-        normalized = _normalize_question_type(fallback_type)
-        if normalized:
-            qtype = normalized
-        else:
-            qtype = "unknown"
     else:
+        # Unknown type
         qtype = "unknown"
     
     return (qtype, extra)
@@ -148,12 +174,14 @@ def fetch_tournament_questions(contest_slug=None):
     if contest_slug is None:
         contest_slug = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
     
-    url = "https://www.metaculus.com/api2/questions/"
+    url = METACULUS_API_BASE
     params = {
         "search": f"contest:{contest_slug}",
         "status": "open",
         "limit": 1000,
-        "order_by": "-activity"
+        "order_by": "-activity",
+        "expand": "possibility",
+        "fields": "id,title,description,possibility"
     }
     
     try:
@@ -165,6 +193,29 @@ def fetch_tournament_questions(contest_slug=None):
         raw_questions = data.get("results", [])
         print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
         
+        # Identify questions missing 'possibility' field and hydrate them
+        questions_to_hydrate = []
+        for q in raw_questions:
+            if not q.get("possibility"):
+                questions_to_hydrate.append(q.get("id"))
+        
+        if questions_to_hydrate:
+            print(f"[INFO] Hydrating possibility for {len(questions_to_hydrate)} questions (per-ID fetch)...")
+            for qid in questions_to_hydrate:
+                try:
+                    hydrate_url = f"{METACULUS_API_BASE}{qid}/?expand=possibility"
+                    hydrate_resp = requests.get(hydrate_url, timeout=15)
+                    hydrate_resp.raise_for_status()
+                    hydrated_data = hydrate_resp.json()
+                    
+                    # Find the question in raw_questions and update its possibility field
+                    for q in raw_questions:
+                        if q.get("id") == qid:
+                            q["possibility"] = hydrated_data.get("possibility", {})
+                            break
+                except Exception as e:
+                    print(f"[WARN] Failed to hydrate question {qid}: {e}")
+        
         # Debug smoke-print: show sample of first 5 questions
         print(f"[DEBUG] Sample of first {min(5, len(raw_questions))} questions:")
         for i, q in enumerate(raw_questions[:5]):
@@ -172,7 +223,7 @@ def fetch_tournament_questions(contest_slug=None):
             poss = q.get("possibility", {})
             poss_type = poss.get("type", "") if poss else ""
             q_type = q.get("type", "")
-            print(f"  Q{qid}: possibility.type={repr(poss_type)}, q.type={repr(q_type)}")
+            print(f"  ({qid}, {repr(poss_type)}, {repr(q_type)})")
         
         # Normalize to pipeline format
         questions = []
