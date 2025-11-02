@@ -37,7 +37,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          METACULUS_CONTEST_SLUG: fall-aib
+          METACULUS_CONTEST_SLUG: fall-aib-2025
         run: |
           git rev-parse --short HEAD
           poetry run python main.py --mode tournament_dryrun
