@@ -118,9 +118,19 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
         
         if "possibilities" in core:
             poss_list = core["possibilities"]
-            print(f"  core.possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
-            if isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
-                print(f"  core.possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
+            # Log type information for possibilities
+            if isinstance(poss_list, dict):
+                poss_type = poss_list.get("type", "N/A")
+                print(f"  core.possibilities present (dict): type={poss_type}", flush=True)
+                print(f"  core.possibilities keys: {list(poss_list.keys())}", flush=True)
+            elif isinstance(poss_list, list):
+                print(f"  core.possibilities present (list): length={len(poss_list)}", flush=True)
+                if len(poss_list) > 0 and isinstance(poss_list[0], dict):
+                    print(f"  core.possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
+                    poss_type = poss_list[0].get("type", "N/A")
+                    print(f"  core.possibilities[0].type: {poss_type}", flush=True)
+            else:
+                print(f"  core.possibilities present: {type(poss_list)}", flush=True)
         else:
             print(f"  core.possibilities: NOT PRESENT", flush=True)
         
