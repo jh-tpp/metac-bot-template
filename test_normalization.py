@@ -1,9 +1,11 @@
 """Test the new _normalize_question_object function"""
 import sys
+import os
 import json
 
-# Add the main module to the path
-sys.path.insert(0, '/home/runner/work/metac-bot-template/metac-bot-template')
+# Add the main module to the path using relative directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
 
 from main import _normalize_question_object, _get_core_question
 

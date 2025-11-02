@@ -107,7 +107,6 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
             print(f"  Core (nested question) keys: {list(core.keys())}", flush=True)
         
         # Check for possibility/possibilities in core
-        poss_from_core = core.get("possibilities") or core.get("possibility") or {}
         detected_type = ""
         
         if "possibility" in core:
@@ -209,7 +208,14 @@ def _normalize_question_object(raw):
         return None
     
     # Pivot into core question object
-    core = raw.get("question", raw) or {}
+    # Handle case where question key exists but might be None or empty
+    if "question" in raw and raw["question"]:
+        core = raw["question"]
+    else:
+        core = raw
+    
+    if not core:
+        return None
     
     # Extract basic fields with fallback to raw
     qid = core.get("id") or raw.get("id")

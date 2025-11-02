@@ -1,7 +1,10 @@
 """Test _infer_qtype_and_fields with nested question objects"""
 import sys
+import os
 
-sys.path.insert(0, '/home/runner/work/metac-bot-template/metac-bot-template')
+# Add the main module to the path using relative directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
 
 from main import _infer_qtype_and_fields, _get_core_question
 
