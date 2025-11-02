@@ -2,9 +2,12 @@ import os
 import sys
 import json
 import argparse
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Local modules
 from mc_worlds import run_mc_worlds, WORLD_PROMPT
@@ -29,6 +32,103 @@ ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
 METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
+
+# ========== Diagnostic Helpers ==========
+def _write_debug_files(prefix, raw_text, parsed_obj):
+    """
+    Write debug artifacts: raw response text and parsed JSON.
+    
+    Args:
+        prefix: Filename prefix (e.g., 'debug_q_578_att1')
+        raw_text: Raw response body as string
+        parsed_obj: Parsed response as dict
+    """
+    try:
+        # Write raw text
+        raw_file = f"{prefix}_raw.txt"
+        with open(raw_file, "w", encoding="utf-8") as f:
+            f.write(raw_text)
+        print(f"[DEBUG] Wrote raw response to {raw_file}", flush=True)
+        
+        # Write parsed JSON
+        json_file = f"{prefix}.json"
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(parsed_obj, f, indent=2, ensure_ascii=False)
+        print(f"[DEBUG] Wrote parsed response to {json_file}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to write debug files for {prefix}: {e}", flush=True)
+        traceback.print_exc()
+
+def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, request_params):
+    """
+    Log comprehensive fetch diagnostics.
+    
+    Args:
+        qid: Question ID
+        label: Human-readable label for this attempt
+        resp: requests.Response object
+        raw_text: Raw response body
+        parsed_obj: Parsed response dict
+        request_url: Request URL
+        request_params: Request parameters dict
+    """
+    print(f"\n{'='*60}", flush=True)
+    print(f"[DEBUG FETCH] Q{qid} - {label}", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"Request URL: {request_url}", flush=True)
+    print(f"Request params: {request_params}", flush=True)
+    print(f"Response status: {resp.status_code} {resp.reason}", flush=True)
+    
+    # Log response headers
+    print(f"Response headers:", flush=True)
+    for key, value in resp.headers.items():
+        print(f"  {key}: {value}", flush=True)
+    
+    # Log content info
+    content_length = len(raw_text)
+    print(f"Content-Length: {content_length} bytes", flush=True)
+    print(f"Content-Type: {resp.headers.get('Content-Type', 'N/A')}", flush=True)
+    print(f"Encoding: {resp.encoding}", flush=True)
+    
+    # Log first 2KB of body
+    snippet = raw_text[:2048]
+    print(f"\nFirst 2KB of response body:", flush=True)
+    print(snippet, flush=True)
+    if content_length > 2048:
+        print(f"... (truncated, {content_length - 2048} more bytes)", flush=True)
+    
+    # Log top-level keys
+    if isinstance(parsed_obj, dict):
+        print(f"\nTop-level keys: {list(parsed_obj.keys())}", flush=True)
+        
+        # Check for possibility/possibilities
+        if "possibility" in parsed_obj:
+            poss = parsed_obj["possibility"]
+            poss_type = poss.get("type", "N/A") if isinstance(poss, dict) else "N/A"
+            print(f"  possibility present: type={poss_type}", flush=True)
+            if isinstance(poss, dict):
+                print(f"  possibility keys: {list(poss.keys())}", flush=True)
+        else:
+            print(f"  possibility: NOT PRESENT", flush=True)
+        
+        if "possibilities" in parsed_obj:
+            poss_list = parsed_obj["possibilities"]
+            print(f"  possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
+            if isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
+                print(f"  possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
+        else:
+            print(f"  possibilities: NOT PRESENT", flush=True)
+        
+        # Check for fallback type fields
+        fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
+        print(f"  Fallback type fields:", flush=True)
+        for field in fallback_fields:
+            if field in parsed_obj:
+                print(f"    {field}: {parsed_obj[field]}", flush=True)
+    else:
+        print(f"\nParsed response is not a dict: {type(parsed_obj)}", flush=True)
+    
+    print(f"{'='*60}\n", flush=True)
 
 # ========== Tournament Question Fetcher ==========
 def _normalize_question_type(raw_type):
@@ -79,25 +179,57 @@ def _infer_qtype_and_fields(q):
     
     # Check possibility field first (API2 live schema)
     possibility = q.get("possibility", {})
-    poss_type = possibility.get("type", "").lower() if possibility else ""
+    possibilities = q.get("possibilities", [])
     
-    # Fallback to legacy keys for test stubs
+    # Collect all candidate type values for diagnostics
+    candidates = []
+    
+    # Check possibility.type
+    poss_type = ""
+    if possibility and isinstance(possibility, dict):
+        poss_type = possibility.get("type", "").lower()
+        if poss_type:
+            candidates.append(f"possibility.type={poss_type}")
+    
+    # Check possibilities.type (if possibilities is a list)
+    if not poss_type and possibilities:
+        if isinstance(possibilities, list) and len(possibilities) > 0:
+            if isinstance(possibilities[0], dict):
+                poss_list_type = possibilities[0].get("type", "").lower()
+                if poss_list_type:
+                    candidates.append(f"possibilities[0].type={poss_list_type}")
+                    poss_type = poss_list_type
+    
+    # Fallback to legacy keys
     if not poss_type:
-        poss_type = q.get("possibility_type", "").lower()
-    if not poss_type:
-        poss_type = q.get("prediction_type", "").lower()
-    if not poss_type:
-        poss_type = q.get("type", "").lower()
+        for field_name in ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
+            val = q.get(field_name, "").lower()
+            if val:
+                candidates.append(f"{field_name}={val}")
+                if not poss_type:
+                    poss_type = val
     
     # Normalize possibility.type values to canonical types
     # Binary types
     if poss_type in ["binary", "bool", "boolean"]:
         qtype = "binary"
     # Multiple choice types
-    elif poss_type in ["one_of", "categorical", "multiple_choice"]:
+    elif poss_type in ["one_of", "oneof", "categorical", "multiple_choice", "multiple-choice"]:
         qtype = "multiple_choice"
-        # Extract options
-        options_data = possibility.get("options", [])
+        # Extract options from multiple sources
+        options_data = []
+        
+        # Try possibility.options
+        if possibility and isinstance(possibility, dict) and "options" in possibility:
+            options_data = possibility["options"]
+        # Try possibilities.options
+        elif possibilities and isinstance(possibilities, list) and len(possibilities) > 0:
+            if isinstance(possibilities[0], dict) and "options" in possibilities[0]:
+                options_data = possibilities[0]["options"]
+        # Try top-level options
+        elif "options" in q:
+            options_data = q["options"]
+        
         options = []
         for i, opt in enumerate(options_data):
             if isinstance(opt, dict):
@@ -109,26 +241,38 @@ def _infer_qtype_and_fields(q):
             else:
                 options.append(f"opt_{i}")
         extra["options"] = options
-    # Numeric types (continuous, float, integer, number, linear, log, numeric)
-    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log"]:
+    # Numeric types (continuous, float, integer, number, linear, log, numeric, discrete, date)
+    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log", "discrete", "date"]:
         qtype = "numeric"
         # Extract numeric bounds - try multiple field names
         numeric_bounds = {}
         
         # Try possibility.range first
-        if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
-            numeric_bounds["min"] = possibility["range"][0]
-            numeric_bounds["max"] = possibility["range"][1]
-        # Try possibility.bounds
-        elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
-            numeric_bounds["min"] = possibility["bounds"][0]
-            numeric_bounds["max"] = possibility["bounds"][1]
-        # Try direct min/max in possibility
-        else:
-            if "min" in possibility:
-                numeric_bounds["min"] = possibility["min"]
-            if "max" in possibility:
-                numeric_bounds["max"] = possibility["max"]
+        if possibility and isinstance(possibility, dict):
+            if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
+                numeric_bounds["min"] = possibility["range"][0]
+                numeric_bounds["max"] = possibility["range"][1]
+            # Try possibility.bounds
+            elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
+                numeric_bounds["min"] = possibility["bounds"][0]
+                numeric_bounds["max"] = possibility["bounds"][1]
+            # Try direct min/max in possibility
+            else:
+                if "min" in possibility:
+                    numeric_bounds["min"] = possibility["min"]
+                if "max" in possibility:
+                    numeric_bounds["max"] = possibility["max"]
+        
+        # Try possibilities if possibility didn't work
+        if not numeric_bounds and possibilities and isinstance(possibilities, list) and len(possibilities) > 0:
+            if isinstance(possibilities[0], dict):
+                poss_item = possibilities[0]
+                if "range" in poss_item and isinstance(poss_item["range"], (list, tuple)) and len(poss_item["range"]) >= 2:
+                    numeric_bounds["min"] = poss_item["range"][0]
+                    numeric_bounds["max"] = poss_item["range"][1]
+                elif "bounds" in poss_item and isinstance(poss_item["bounds"], (list, tuple)) and len(poss_item["bounds"]) >= 2:
+                    numeric_bounds["min"] = poss_item["bounds"][0]
+                    numeric_bounds["max"] = poss_item["bounds"][1]
         
         # Fallback to legacy keys at top level
         if not numeric_bounds:
@@ -140,27 +284,27 @@ def _infer_qtype_and_fields(q):
                 numeric_bounds["max"] = q["range_max"]
         
         # Extract unit and scale
-        if "unit" in possibility:
-            numeric_bounds["unit"] = possibility["unit"]
-        if "scale" in possibility:
-            numeric_bounds["scale"] = possibility["scale"]
+        if possibility and isinstance(possibility, dict):
+            if "unit" in possibility:
+                numeric_bounds["unit"] = possibility["unit"]
+            if "scale" in possibility:
+                numeric_bounds["scale"] = possibility["scale"]
         
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
-    # Date types (treated as numeric)
-    elif poss_type == "date":
-        qtype = "numeric"  # Dates are treated as numeric (timestamp)
-        # Extract date bounds if present
-        numeric_bounds = {}
-        if "min" in possibility:
-            numeric_bounds["min"] = possibility["min"]
-        if "max" in possibility:
-            numeric_bounds["max"] = possibility["max"]
-        if numeric_bounds:
-            extra["numeric_bounds"] = numeric_bounds
     else:
-        # Unknown type
+        # Unknown type - log diagnostics
         qtype = "unknown"
+        qid = q.get("id", "?")
+        print(f"[INFER UNKNOWN] Q{qid}: Could not infer type from candidates: {candidates}", flush=True)
+        
+        # Log keys under possibility/possibilities for deeper investigation
+        if possibility and isinstance(possibility, dict):
+            print(f"[INFER UNKNOWN] Q{qid}: possibility keys: {list(possibility.keys())}", flush=True)
+        if possibilities:
+            print(f"[INFER UNKNOWN] Q{qid}: possibilities type: {type(possibilities)}, length: {len(possibilities) if isinstance(possibilities, (list, tuple)) else 'N/A'}", flush=True)
+            if isinstance(possibilities, list) and len(possibilities) > 0 and isinstance(possibilities[0], dict):
+                print(f"[INFER UNKNOWN] Q{qid}: possibilities[0] keys: {list(possibilities[0].keys())}", flush=True)
     
     return (qtype, extra)
 
@@ -856,50 +1000,181 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         return False
 
 # ========== Live Test & Smoke Test Helpers ==========
-def _hydrate_possibility(qid, timeout=20):
+def _create_session_with_retry():
     """
-    Fetch a single question from Metaculus API with possibility field.
+    Create a requests session with retry logic.
+    
+    Returns:
+        requests.Session with retry adapter
+    """
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+def _hydrate_question_with_diagnostics(qid):
+    """
+    Fetch a single question from Metaculus API with comprehensive diagnostics.
+    Tries multiple URL and parameter variants, logging each attempt.
     
     Args:
         qid: Question ID
-        timeout: Request timeout in seconds
     
     Returns:
-        Question dict or None on failure
+        Merged question dict or None on failure
     """
-    try:
-        url = f"{METACULUS_API_BASE}{qid}/?expand=possibility"
-        resp = requests.get(url, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch question {qid}: {e}")
-        return None
+    print(f"\n[HYDRATE] Starting comprehensive fetch for Q{qid}", flush=True)
+    
+    session = _create_session_with_retry()
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "metac-bot-template/1.0"
+    }
+    
+    # Try multiple variants in order
+    attempts = [
+        {
+            "label": "attempt 1: with trailing slash, expand=possibility, fields",
+            "url": f"{METACULUS_API_BASE}{qid}/",
+            "params": {
+                "expand": "possibility",
+                "fields": "id,title,description,type,possibility,options"
+            }
+        },
+        {
+            "label": "attempt 2: with trailing slash, plain detail",
+            "url": f"{METACULUS_API_BASE}{qid}/",
+            "params": {}
+        },
+        {
+            "label": "attempt 3: no trailing slash, expand=possibility, fields",
+            "url": f"{METACULUS_API_BASE}{qid}",
+            "params": {
+                "expand": "possibility",
+                "fields": "id,title,description,type,possibility,options"
+            }
+        },
+        {
+            "label": "attempt 4: no trailing slash, plain detail",
+            "url": f"{METACULUS_API_BASE}{qid}",
+            "params": {}
+        }
+    ]
+    
+    merged_data = None
+    
+    for i, attempt in enumerate(attempts, 1):
+        label = attempt["label"]
+        url = attempt["url"]
+        params = attempt["params"]
+        
+        print(f"\n[HYDRATE] Q{qid} - {label}", flush=True)
+        print(f"  Request headers: {headers}", flush=True)
+        
+        try:
+            resp = session.get(url, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            
+            raw_text = resp.text
+            parsed_obj = resp.json()
+            
+            # Log comprehensive diagnostics
+            _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params)
+            
+            # Write debug files
+            prefix = f"debug_q_{qid}_att{i}"
+            _write_debug_files(prefix, raw_text, parsed_obj)
+            
+            # Merge into working object
+            if merged_data is None:
+                merged_data = parsed_obj
+            else:
+                # Merge possibility/possibilities if present
+                if "possibility" in parsed_obj and parsed_obj["possibility"]:
+                    merged_data["possibility"] = parsed_obj["possibility"]
+                    print(f"[HYDRATE] Q{qid} - Merged possibility from {label}", flush=True)
+                
+                if "possibilities" in parsed_obj and parsed_obj["possibilities"]:
+                    merged_data["possibilities"] = parsed_obj["possibilities"]
+                    print(f"[HYDRATE] Q{qid} - Merged possibilities from {label}", flush=True)
+                
+                # Merge top-level type fields
+                for field in ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
+                    if field in parsed_obj and parsed_obj[field]:
+                        merged_data[field] = parsed_obj[field]
+                        print(f"[HYDRATE] Q{qid} - Merged {field} from {label}", flush=True)
+            
+            print(f"[HYDRATE] Q{qid} - {label} SUCCESS", flush=True)
+            
+        except requests.exceptions.HTTPError as e:
+            print(f"[HYDRATE] Q{qid} - {label} FAILED: HTTP {e.response.status_code}", flush=True)
+            traceback.print_exc()
+        except requests.exceptions.Timeout as e:
+            print(f"[HYDRATE] Q{qid} - {label} FAILED: Timeout", flush=True)
+            traceback.print_exc()
+        except Exception as e:
+            print(f"[HYDRATE] Q{qid} - {label} FAILED: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc()
+    
+    # Write final merged object
+    if merged_data:
+        print(f"\n[HYDRATE] Q{qid} - Writing final merged object", flush=True)
+        final_prefix = f"debug_q_{qid}_final"
+        try:
+            final_file = f"{final_prefix}.json"
+            with open(final_file, "w", encoding="utf-8") as f:
+                json.dump(merged_data, f, indent=2, ensure_ascii=False)
+            print(f"[HYDRATE] Q{qid} - Wrote final merged object to {final_file}", flush=True)
+            print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(merged_data.keys())}", flush=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to write final merged object for Q{qid}: {e}", flush=True)
+            traceback.print_exc()
+    else:
+        print(f"[HYDRATE] Q{qid} - FAILED: No successful fetches", flush=True)
+    
+    return merged_data
 
 def run_live_test():
     """
     Live test on three long-lived Metaculus questions (578, 14333, 22427).
     Fetches questions, runs pipeline, writes artifacts. Never submits.
     """
-    print("[LIVE TEST] Starting...")
+    print("[LIVE TEST] Starting...", flush=True)
+    print(f"[LIVE TEST] Python version: {sys.version}", flush=True)
+    print(f"[LIVE TEST] Requests version: {requests.__version__}", flush=True)
     
-    # Fetch three long-lived questions
+    # Fetch three long-lived questions with comprehensive diagnostics
     test_qids = [578, 14333, 22427]  # binary, numeric, multiple_choice
     raw_questions = []
     
     for qid in test_qids:
-        print(f"[INFO] Fetching question {qid}...")
-        q = _hydrate_possibility(qid, timeout=20)
+        print(f"\n{'#'*70}", flush=True)
+        print(f"[LIVE TEST] Starting fetch for question {qid}", flush=True)
+        print(f"{'#'*70}", flush=True)
+        
+        q = _hydrate_question_with_diagnostics(qid)
         if q:
             raw_questions.append(q)
+            print(f"[LIVE TEST] Successfully fetched Q{qid}", flush=True)
         else:
-            print(f"[WARN] Could not fetch question {qid}, skipping")
+            print(f"[WARN] Could not fetch question {qid}, skipping", flush=True)
     
     if not raw_questions:
-        print("[ERROR] No questions fetched. Aborting live test.")
+        print("[ERROR] No questions fetched. Check debug artifacts in current directory:", flush=True)
+        print("  - debug_q_*_raw.txt (raw response bodies)", flush=True)
+        print("  - debug_q_*.json (parsed response objects)", flush=True)
+        print("  - debug_q_{id}_final.json (final merged objects)", flush=True)
         return
     
     # Normalize questions
+    print(f"\n[LIVE TEST] Normalizing {len(raw_questions)} fetched questions...", flush=True)
     questions = []
     for q in raw_questions:
         qid = q.get("id")
@@ -909,10 +1184,10 @@ def run_live_test():
         qtype, extra = _infer_qtype_and_fields(q)
         
         if qtype == "unknown":
-            print(f"[SKIP] Unknown type for Q{qid}")
+            print(f"[SKIP] Unknown type for Q{qid} - check debug artifacts", flush=True)
             continue
         
-        print(f"[INFO] Q{qid} inferred type: {qtype}")
+        print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
         
         title = q.get("title") or q.get("name", "")
         description = q.get("description", "")
@@ -928,6 +1203,7 @@ def run_live_test():
         if qtype == "multiple_choice":
             options = extra.get("options", [])
             normalized["options"] = [{"name": name} for name in options]
+            print(f"[INFO] Q{qid} options: {[opt['name'] for opt in normalized['options']]}", flush=True)
         else:
             normalized["options"] = []
         
@@ -943,10 +1219,22 @@ def run_live_test():
                     normalized["max"] = float(numeric_bounds["max"])
                 except (ValueError, TypeError):
                     normalized["max"] = numeric_bounds["max"]
+            if "min" in normalized and "max" in normalized:
+                print(f"[INFO] Q{qid} numeric bounds: [{normalized['min']}, {normalized['max']}]", flush=True)
         
         questions.append(normalized)
     
+    if not questions:
+        print("[ERROR] Zero questions normalized. Check debug artifacts:", flush=True)
+        print("  - debug_q_*_raw.txt (raw response bodies)", flush=True)
+        print("  - debug_q_*.json (parsed response objects)", flush=True)
+        print("  - debug_q_{id}_final.json (final merged objects)", flush=True)
+        return
+    
+    print(f"\n[LIVE TEST] Successfully normalized {len(questions)} questions", flush=True)
+    
     # Fetch AskNews facts
+    print(f"\n[LIVE TEST] Fetching AskNews facts...", flush=True)
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     
@@ -958,9 +1246,11 @@ def run_live_test():
         qid = q["id"]
         facts = news.get(qid, [])
         
-        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
-        print(f"  Type: {q['type']}")
-        print(f"  AskNews facts: {len(facts)}")
+        print(f"\n{'='*60}", flush=True)
+        print(f"[INFO] Processing Q{qid}: {q['title']}", flush=True)
+        print(f"  Type: {q['type']}", flush=True)
+        print(f"  AskNews facts: {len(facts)}", flush=True)
+        print(f"{'='*60}", flush=True)
         
         mc_out = run_mc_worlds(
             question_obj=q,
@@ -984,15 +1274,25 @@ def run_live_test():
         for b in bullets:
             all_reasons.append(f"  • {b}")
         all_reasons.append("")
+        
+        print(f"[INFO] Q{qid} processing complete", flush=True)
     
     # Write artifacts
+    print(f"\n[LIVE TEST] Writing output artifacts...", flush=True)
     with open("mc_results.json", "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"[LIVE TEST] Wrote mc_results.json", flush=True)
     
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_reasons))
+    print(f"[LIVE TEST] Wrote mc_reasons.txt", flush=True)
     
-    print("\n[LIVE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+    print("\n[LIVE TEST] Complete. Artifacts:", flush=True)
+    print("  - mc_results.json (forecast results)", flush=True)
+    print("  - mc_reasons.txt (reasoning)", flush=True)
+    print("  - debug_q_*_raw.txt (raw API responses)", flush=True)
+    print("  - debug_q_*.json (parsed API responses)", flush=True)
+    print("  - debug_q_{id}_final.json (final merged objects)", flush=True)
 
 def run_submit_smoke_test(test_qid, publish=False):
     """
@@ -1002,14 +1302,14 @@ def run_submit_smoke_test(test_qid, publish=False):
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
     """
-    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...")
+    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...", flush=True)
     
     # Fetch question
-    print(f"[INFO] Fetching question {test_qid}...")
-    q = _hydrate_possibility(test_qid, timeout=20)
+    print(f"[INFO] Fetching question {test_qid}...", flush=True)
+    q = _hydrate_question_with_diagnostics(test_qid)
     
     if not q:
-        print(f"[ERROR] Could not fetch question {test_qid}. Aborting.")
+        print(f"[ERROR] Could not fetch question {test_qid}. Aborting.", flush=True)
         return
     
     # Normalize question
@@ -1017,10 +1317,10 @@ def run_submit_smoke_test(test_qid, publish=False):
     qtype, extra = _infer_qtype_and_fields(q)
     
     if qtype == "unknown":
-        print(f"[ERROR] Unknown question type for Q{qid}. Aborting.")
+        print(f"[ERROR] Unknown question type for Q{qid}. Aborting.", flush=True)
         return
     
-    print(f"[INFO] Q{qid} inferred type: {qtype}")
+    print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
     
     title = q.get("title") or q.get("name", "")
     description = q.get("description", "")
