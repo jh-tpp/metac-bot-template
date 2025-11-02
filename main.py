@@ -23,7 +23,7 @@ NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 METACULUS_API_BASE = "https://www.metaculus.com/api2/questions/"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "openai/gpt-4o-mini"
+OPENROUTER_MODEL = "openai/gpt-5-nano"
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
