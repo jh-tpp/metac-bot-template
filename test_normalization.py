@@ -76,8 +76,8 @@ def test_v2_continuous_to_numeric():
     assert "numeric_bounds" in extra, "Expected 'numeric_bounds' in extra"
     assert extra["numeric_bounds"]["min"] == 0, f"Expected min=0, got {extra['numeric_bounds'].get('min')}"
     assert extra["numeric_bounds"]["max"] == 100, f"Expected max=100, got {extra['numeric_bounds'].get('max')}"
-    assert extra["numeric_bounds"]["unit"] == "percentage", f"Expected unit='percentage'"
-    assert extra["numeric_bounds"]["scale"] == "linear", f"Expected scale='linear'"
+    assert extra["numeric_bounds"]["unit"] == "percentage", f"Expected unit='percentage', got {extra['numeric_bounds'].get('unit')}"
+    assert extra["numeric_bounds"]["scale"] == "linear", f"Expected scale='linear', got {extra['numeric_bounds'].get('scale')}"
     print("✓ test_v2_continuous_to_numeric passed")
 
 
