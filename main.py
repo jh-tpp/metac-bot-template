@@ -30,6 +30,12 @@ RETRY_STATUS_FORCELIST = [429, 500, 502, 503, 504]
 ERROR_KEY_REQUEST = "_request_error"
 ERROR_KEY_PARSE = "_parse_error"
 
+# Type inference constants
+FALLBACK_TYPE_FIELDS = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
+BINARY_TYPE_VARIANTS = ["binary", "bool", "boolean"]
+MULTIPLE_CHOICE_TYPE_VARIANTS = ["one_of", "categorical", "multiple_choice", "multiplechoice", "mc"]
+NUMERIC_TYPE_VARIANTS = ["continuous", "float", "integer", "number", "numeric", "linear", "log", "date", "discrete"]
+
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
@@ -89,7 +95,7 @@ def _write_debug_files(prefix, raw_text, parsed_obj):
         # Write parsed JSON
         json_file = f"{prefix}.json"
         with open(json_file, "w", encoding="utf-8") as f:
-            json.dump(parsed_obj, f, indent=2, ensure_ascii=False)
+            json.dump(parsed_obj, f, indent=2)
         _dprint(f"[DEBUG] Wrote {json_file}")
     except Exception as e:
         _dprint(f"[ERROR] Failed to write debug files for {prefix}: {e}")
@@ -313,7 +319,7 @@ def _hydrate_single_question(sess, qid):
     
     # Write final merged result
     prefix = f"debug_q_{qid}_final"
-    merged_json = json.dumps(merged, indent=2, ensure_ascii=False)
+    merged_json = json.dumps(merged, indent=2)
     _write_debug_files(prefix, merged_json, merged)
     
     _dprint(f"[HYDRATE] Completed multi-attempt hydration for Q{qid}\n")
@@ -394,8 +400,7 @@ def _infer_qtype_and_fields(q):
             candidates_tried.append(f"type={repr(poss_type)}")
     
     # Priority 4+: legacy/fallback fields
-    fallback_fields = ["possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
-    for field in fallback_fields:
+    for field in FALLBACK_TYPE_FIELDS[1:]:  # Skip "type" as we already checked it
         if not poss_type:
             poss_type = q.get(field, "").lower()
             if poss_type:
@@ -403,10 +408,10 @@ def _infer_qtype_and_fields(q):
     
     # Normalize possibility.type values to canonical types
     # Binary types
-    if poss_type in ["binary", "bool", "boolean"]:
+    if poss_type in BINARY_TYPE_VARIANTS:
         qtype = "binary"
-    # Multiple choice types (extended variants)
-    elif poss_type in ["one_of", "categorical", "multiple_choice", "multiplechoice", "mc"]:
+    # Multiple choice types
+    elif poss_type in MULTIPLE_CHOICE_TYPE_VARIANTS:
         qtype = "multiple_choice"
         
         # Extract options from possibility or possibilities
@@ -431,7 +436,7 @@ def _infer_qtype_and_fields(q):
         extra["options"] = options
         
     # Numeric types (extended variants)
-    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log", "date", "discrete"]:
+    elif poss_type in NUMERIC_TYPE_VARIANTS:
         qtype = "numeric"
         
         # Extract numeric bounds - try multiple field names from both possibility and possibilities
@@ -1246,9 +1251,8 @@ def run_live_test():
         _dprint(f"[NORMALIZE] Q{qid} - Merged keys: {list(q.keys())}")
         
         # Log presence of fallback type fields
-        fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
         _dprint(f"[NORMALIZE] Q{qid} - Fallback type fields present:")
-        for field in fallback_fields:
+        for field in FALLBACK_TYPE_FIELDS:
             val = q.get(field)
             if val is not None:
                 _dprint(f"  {field}: {repr(val)}")
