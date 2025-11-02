@@ -101,36 +101,56 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
     if isinstance(parsed_obj, dict):
         print(f"\nTop-level keys: {list(parsed_obj.keys())}", flush=True)
         
-        # Check for possibility/possibilities
-        if "possibility" in parsed_obj:
-            poss = parsed_obj["possibility"]
+        # Pivot into core question object for nested inspection
+        core = _get_core_question(parsed_obj)
+        if core is not parsed_obj:
+            print(f"  Core (nested question) keys: {list(core.keys())}", flush=True)
+        
+        # Check for possibility/possibilities in core
+        if "possibility" in core:
+            poss = core["possibility"]
             poss_type = poss.get("type", "N/A") if isinstance(poss, dict) else "N/A"
-            print(f"  possibility present: type={poss_type}", flush=True)
+            print(f"  core.possibility present: type={poss_type}", flush=True)
             if isinstance(poss, dict):
-                print(f"  possibility keys: {list(poss.keys())}", flush=True)
+                print(f"  core.possibility keys: {list(poss.keys())}", flush=True)
         else:
-            print(f"  possibility: NOT PRESENT", flush=True)
+            print(f"  core.possibility: NOT PRESENT", flush=True)
         
-        if "possibilities" in parsed_obj:
-            poss_list = parsed_obj["possibilities"]
-            print(f"  possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
+        if "possibilities" in core:
+            poss_list = core["possibilities"]
+            print(f"  core.possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
             if isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
-                print(f"  possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
+                print(f"  core.possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
         else:
-            print(f"  possibilities: NOT PRESENT", flush=True)
+            print(f"  core.possibilities: NOT PRESENT", flush=True)
         
-        # Check for fallback type fields
+        # Check for fallback type fields in core
         fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
-        print(f"  Fallback type fields:", flush=True)
+        print(f"  Core fallback type fields:", flush=True)
         for field in fallback_fields:
-            if field in parsed_obj:
-                print(f"    {field}: {parsed_obj[field]}", flush=True)
+            if field in core:
+                print(f"    {field}: {core[field]}", flush=True)
     else:
         print(f"\nParsed response is not a dict: {type(parsed_obj)}", flush=True)
     
     print(f"{'='*60}\n", flush=True)
 
 # ========== Tournament Question Fetcher ==========
+def _get_core_question(raw):
+    """
+    Get the core question object, pivoting into nested 'question' key if present.
+    
+    Args:
+        raw: Question dict from Metaculus API (may be top-level or nested under 'question')
+    
+    Returns:
+        Core question dict (the nested object if present, otherwise raw, or empty dict if None)
+    """
+    if not raw:
+        return {}
+    core = raw.get("question", raw)
+    return core if core else {}
+
 def _normalize_question_type(raw_type):
     """
     Normalize a question type string to canonical format.
@@ -163,10 +183,10 @@ def _normalize_question_type(raw_type):
 def _infer_qtype_and_fields(q):
     """
     Infer question type and extract relevant fields from Metaculus API2 question object.
-    Inspects q.get("possibility") and falls back to legacy keys for test stubs.
+    Pivots into nested 'question' key if present, then inspects possibilities/possibility.
     
     Args:
-        q: Question dict from Metaculus API2
+        q: Question dict from Metaculus API2 (may be nested under 'question' key)
     
     Returns:
         Tuple (qtype, extra) where:
@@ -177,134 +197,141 @@ def _infer_qtype_and_fields(q):
     """
     extra = {}
     
-    # Check possibility field first (API2 live schema)
-    possibility = q.get("possibility", {})
-    possibilities = q.get("possibilities", [])
+    # Pivot into core question object
+    core = _get_core_question(q)
+    qid = core.get("id") or q.get("id", "?")
     
-    # Collect all candidate type values for diagnostics
-    candidates = []
+    # Get possibilities/possibility from core (defensive for both singular/plural)
+    poss = core.get("possibilities") or core.get("possibility") or {}
     
-    # Check possibility.type
-    poss_type = ""
-    if possibility and isinstance(possibility, dict):
-        poss_type = possibility.get("type", "").lower()
-        if poss_type:
-            candidates.append(f"possibility.type={poss_type}")
+    # Determine type from possibilities/possibility or fallback to core.type
+    ptype = ""
+    if isinstance(poss, dict):
+        ptype = (poss.get("type") or "").strip().lower()
+    elif isinstance(poss, list) and len(poss) > 0 and isinstance(poss[0], dict):
+        ptype = (poss[0].get("type") or "").strip().lower()
     
-    # Check possibilities.type (if possibilities is a list)
-    if not poss_type and possibilities:
-        if isinstance(possibilities, list) and len(possibilities) > 0:
-            if isinstance(possibilities[0], dict):
-                poss_list_type = possibilities[0].get("type", "").lower()
-                if poss_list_type:
-                    candidates.append(f"possibilities[0].type={poss_list_type}")
-                    poss_type = poss_list_type
+    # Fallback to core.type if ptype not found
+    if not ptype:
+        ptype = (core.get("type") or "").strip().lower()
     
-    # Fallback to legacy keys
-    if not poss_type:
-        for field_name in ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
-            val = q.get(field_name, "").lower()
-            if val:
-                candidates.append(f"{field_name}={val}")
-                if not poss_type:
-                    poss_type = val
-    
-    # Normalize possibility.type values to canonical types
-    # Binary types
-    if poss_type in ["binary", "bool", "boolean"]:
+    # Map types per Metaculus v2 semantics
+    if ptype in ["binary", "bool", "boolean"]:
         qtype = "binary"
-    # Multiple choice types
-    elif poss_type in ["one_of", "oneof", "categorical", "multiple_choice", "multiple-choice"]:
+    
+    elif ptype in ["discrete"]:
+        # discrete → multiple_choice
         qtype = "multiple_choice"
-        # Extract options from multiple sources
-        options_data = []
-        
-        # Try possibility.options
-        if possibility and isinstance(possibility, dict) and "options" in possibility:
-            options_data = possibility["options"]
-        # Try possibilities.options
-        elif possibilities and isinstance(possibilities, list) and len(possibilities) > 0:
-            if isinstance(possibilities[0], dict) and "options" in possibilities[0]:
-                options_data = possibilities[0]["options"]
-        # Try top-level options
-        elif "options" in q:
-            options_data = q["options"]
-        
+        # Extract option names from poss.outcomes[].name|label or core.options
         options = []
-        for i, opt in enumerate(options_data):
-            if isinstance(opt, dict):
-                # Try keys: name, label, title
-                name = opt.get("name") or opt.get("label") or opt.get("title") or f"opt_{i}"
-                options.append(name)
-            elif isinstance(opt, str):
-                options.append(opt)
-            else:
-                options.append(f"opt_{i}")
+        
+        # Try poss.outcomes
+        if isinstance(poss, dict) and "outcomes" in poss:
+            outcomes = poss["outcomes"]
+            if isinstance(outcomes, list):
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        name = outcome.get("name") or outcome.get("label") or ""
+                        if name:
+                            options.append(name)
+        
+        # Fallback to core.options
+        if not options and "options" in core:
+            options_data = core["options"]
+            if isinstance(options_data, list):
+                for opt in options_data:
+                    if isinstance(opt, dict):
+                        name = opt.get("name") or opt.get("label") or opt.get("title") or ""
+                        if name:
+                            options.append(name)
+                    elif isinstance(opt, str):
+                        options.append(opt)
+        
         extra["options"] = options
-    # Numeric types (continuous, float, integer, number, linear, log, numeric, discrete, date)
-    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log", "discrete", "date"]:
+    
+    elif ptype in ["continuous"]:
+        # continuous → numeric
         qtype = "numeric"
-        # Extract numeric bounds - try multiple field names
+        # Extract bounds from poss.range or poss.min/max
         numeric_bounds = {}
         
-        # Try possibility.range first
-        if possibility and isinstance(possibility, dict):
-            if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
-                numeric_bounds["min"] = possibility["range"][0]
-                numeric_bounds["max"] = possibility["range"][1]
-            # Try possibility.bounds
-            elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
-                numeric_bounds["min"] = possibility["bounds"][0]
-                numeric_bounds["max"] = possibility["bounds"][1]
-            # Try direct min/max in possibility
-            else:
-                if "min" in possibility:
-                    numeric_bounds["min"] = possibility["min"]
-                if "max" in possibility:
-                    numeric_bounds["max"] = possibility["max"]
-        
-        # Try possibilities if possibility didn't work
-        if not numeric_bounds and possibilities and isinstance(possibilities, list) and len(possibilities) > 0:
-            if isinstance(possibilities[0], dict):
-                poss_item = possibilities[0]
-                if "range" in poss_item and isinstance(poss_item["range"], (list, tuple)) and len(poss_item["range"]) >= 2:
-                    numeric_bounds["min"] = poss_item["range"][0]
-                    numeric_bounds["max"] = poss_item["range"][1]
-                elif "bounds" in poss_item and isinstance(poss_item["bounds"], (list, tuple)) and len(poss_item["bounds"]) >= 2:
-                    numeric_bounds["min"] = poss_item["bounds"][0]
-                    numeric_bounds["max"] = poss_item["bounds"][1]
-        
-        # Fallback to legacy keys at top level
-        if not numeric_bounds:
-            if "numerical_range" in q and isinstance(q["numerical_range"], (list, tuple)) and len(q["numerical_range"]) >= 2:
-                numeric_bounds["min"] = q["numerical_range"][0]
-                numeric_bounds["max"] = q["numerical_range"][1]
-            elif "range_min" in q and "range_max" in q:
-                numeric_bounds["min"] = q["range_min"]
-                numeric_bounds["max"] = q["range_max"]
-        
-        # Extract unit and scale
-        if possibility and isinstance(possibility, dict):
-            if "unit" in possibility:
-                numeric_bounds["unit"] = possibility["unit"]
-            if "scale" in possibility:
-                numeric_bounds["scale"] = possibility["scale"]
+        if isinstance(poss, dict):
+            # Try poss.range
+            if "range" in poss:
+                poss_range = poss["range"]
+                if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                    numeric_bounds["min"] = poss_range[0]
+                    numeric_bounds["max"] = poss_range[1]
+            # Try poss.min/max
+            if not numeric_bounds:
+                if "min" in poss:
+                    numeric_bounds["min"] = poss["min"]
+                if "max" in poss:
+                    numeric_bounds["max"] = poss["max"]
+            
+            # Extract unit and scale
+            if "unit" in poss:
+                numeric_bounds["unit"] = poss["unit"]
+            if "scale" in poss:
+                numeric_bounds["scale"] = poss["scale"]
         
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
+    
     else:
-        # Unknown type - log diagnostics
+        # Fallback inference: check for outcomes or range/min/max
         qtype = "unknown"
-        qid = q.get("id", "?")
-        print(f"[INFER UNKNOWN] Q{qid}: Could not infer type from candidates: {candidates}", flush=True)
         
-        # Log keys under possibility/possibilities for deeper investigation
-        if possibility and isinstance(possibility, dict):
-            print(f"[INFER UNKNOWN] Q{qid}: possibility keys: {list(possibility.keys())}", flush=True)
-        if possibilities:
-            print(f"[INFER UNKNOWN] Q{qid}: possibilities type: {type(possibilities)}, length: {len(possibilities) if isinstance(possibilities, (list, tuple)) else 'N/A'}", flush=True)
-            if isinstance(possibilities, list) and len(possibilities) > 0 and isinstance(possibilities[0], dict):
-                print(f"[INFER UNKNOWN] Q{qid}: possibilities[0] keys: {list(possibilities[0].keys())}", flush=True)
+        # If outcomes present → multiple_choice
+        if isinstance(poss, dict) and "outcomes" in poss:
+            outcomes = poss["outcomes"]
+            if isinstance(outcomes, list) and len(outcomes) > 0:
+                qtype = "multiple_choice"
+                options = []
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        name = outcome.get("name") or outcome.get("label") or ""
+                        if name:
+                            options.append(name)
+                extra["options"] = options
+        
+        # Elif range/min/max present → numeric
+        elif isinstance(poss, dict) and ("range" in poss or "min" in poss or "max" in poss):
+            qtype = "numeric"
+            numeric_bounds = {}
+            if "range" in poss:
+                poss_range = poss["range"]
+                if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                    numeric_bounds["min"] = poss_range[0]
+                    numeric_bounds["max"] = poss_range[1]
+            if not numeric_bounds:
+                if "min" in poss:
+                    numeric_bounds["min"] = poss["min"]
+                if "max" in poss:
+                    numeric_bounds["max"] = poss["max"]
+            if numeric_bounds:
+                extra["numeric_bounds"] = numeric_bounds
+        
+        # Log diagnostics for unknown types
+        if qtype == "unknown":
+            core_poss_type = (core.get("possibilities") or core.get("possibility") or {})
+            if isinstance(core_poss_type, dict):
+                core_poss_type = core_poss_type.get("type")
+            elif isinstance(core_poss_type, list) and len(core_poss_type) > 0:
+                core_poss_type = core_poss_type[0].get("type") if isinstance(core_poss_type[0], dict) else None
+            else:
+                core_poss_type = None
+            
+            print(f"[INFER UNKNOWN] Q{qid}: Could not infer type. ptype='{ptype}', core_poss_type={core_poss_type}", flush=True)
+            
+            # Log keys in core and poss for investigation
+            print(f"[INFER UNKNOWN] Q{qid}: core keys: {list(core.keys())}", flush=True)
+            if isinstance(poss, dict):
+                print(f"[INFER UNKNOWN] Q{qid}: poss keys: {list(poss.keys())}", flush=True)
+            elif isinstance(poss, list) and len(poss) > 0:
+                print(f"[INFER UNKNOWN] Q{qid}: poss is list of length {len(poss)}", flush=True)
+                if isinstance(poss[0], dict):
+                    print(f"[INFER UNKNOWN] Q{qid}: poss[0] keys: {list(poss[0].keys())}", flush=True)
     
     return (qtype, extra)
 
@@ -361,25 +388,36 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
         raw_questions = data.get("results", [])
         print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
         
-        # Identify questions missing 'possibility' field and hydrate them
+        # Identify questions missing 'possibility'/'possibilities' field and hydrate them
         questions_to_hydrate = []
         for q in raw_questions:
-            if not q.get("possibility"):
+            core = _get_core_question(q)
+            if not core.get("possibility") and not core.get("possibilities"):
                 questions_to_hydrate.append(q.get("id"))
         
         if questions_to_hydrate:
             print(f"[INFO] Hydrating possibility for {len(questions_to_hydrate)} questions (per-ID fetch)...")
             for qid in questions_to_hydrate:
                 try:
-                    hydrate_url = f"{METACULUS_API_BASE}{qid}/?expand=possibility"
+                    # Call detail endpoint without expand/fields to get native v2 structure
+                    hydrate_url = f"{METACULUS_API_BASE}{qid}/"
                     hydrate_resp = requests.get(hydrate_url, timeout=15)
                     hydrate_resp.raise_for_status()
                     hydrated_data = hydrate_resp.json()
                     
-                    # Find the question in raw_questions and update its possibility field
+                    # Find the question in raw_questions and update it
                     for q in raw_questions:
                         if q.get("id") == qid:
-                            q["possibility"] = hydrated_data.get("possibility", {})
+                            # If hydrated_data has a nested 'question' key, use that
+                            hydrated_core = hydrated_data.get("question")
+                            if hydrated_core:
+                                q["question"] = hydrated_core
+                            else:
+                                # Otherwise merge the whole hydrated_data as core
+                                # This handles the case where detail returns flat structure
+                                for key in ["possibility", "possibilities", "type", "title", "description"]:
+                                    if key in hydrated_data:
+                                        q[key] = hydrated_data[key]
                             break
                 except Exception as e:
                     print(f"[WARN] Failed to hydrate question {qid}: {e}")
@@ -407,17 +445,19 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
             
             if qtype == "unknown":
                 # Unknown/unmappable type - skip question with explicit source info
-                poss = q.get("possibility", {})
-                poss_type = poss.get("type", "") if poss else ""
-                raw_type = q.get("type", "")
+                core = _get_core_question(q)
+                poss = core.get("possibilities") or core.get("possibility") or {}
+                poss_type = poss.get("type", "") if isinstance(poss, dict) else ""
+                raw_type = core.get("type", "")
                 type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
                 print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
                 skipped_count += 1
                 continue
             
-            # Extract title and description
-            title = q.get("title") or q.get("name", "")
-            description = q.get("description", "")
+            # Extract title and description from core
+            core = _get_core_question(q)
+            title = core.get("title") or q.get("title") or ""
+            description = core.get("description") or q.get("description") or ""
             
             # Build normalized question
             normalized = {
@@ -1096,7 +1136,16 @@ def _hydrate_question_with_diagnostics(qid):
             if merged_data is None:
                 merged_data = parsed_obj
             else:
-                # Merge possibility/possibilities if present
+                # If parsed_obj has a nested 'question', merge its contents
+                if "question" in parsed_obj and isinstance(parsed_obj["question"], dict):
+                    nested_q = parsed_obj["question"]
+                    # Merge nested question into merged_data's question (or create it)
+                    if "question" not in merged_data or not isinstance(merged_data["question"], dict):
+                        merged_data["question"] = {}
+                    merged_data["question"].update(nested_q)
+                    print(f"[HYDRATE] Q{qid} - Merged nested question from {label}", flush=True)
+                
+                # Also merge top-level possibility/possibilities if present
                 if "possibility" in parsed_obj and parsed_obj["possibility"]:
                     merged_data["possibility"] = parsed_obj["possibility"]
                     print(f"[HYDRATE] Q{qid} - Merged possibility from {label}", flush=True)
@@ -1106,7 +1155,7 @@ def _hydrate_question_with_diagnostics(qid):
                     print(f"[HYDRATE] Q{qid} - Merged possibilities from {label}", flush=True)
                 
                 # Merge top-level type fields
-                for field in ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
+                for field in ["type", "title", "description", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
                     if field in parsed_obj and parsed_obj[field]:
                         merged_data[field] = parsed_obj[field]
                         print(f"[HYDRATE] Q{qid} - Merged {field} from {label}", flush=True)
@@ -1189,8 +1238,10 @@ def run_live_test():
         
         print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
         
-        title = q.get("title") or q.get("name", "")
-        description = q.get("description", "")
+        # Extract title and description from core
+        core = _get_core_question(q)
+        title = core.get("title") or q.get("title") or ""
+        description = core.get("description") or q.get("description") or ""
         
         normalized = {
             "id": qid,
@@ -1322,8 +1373,10 @@ def run_submit_smoke_test(test_qid, publish=False):
     
     print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
     
-    title = q.get("title") or q.get("name", "")
-    description = q.get("description", "")
+    # Extract title and description from core
+    core = _get_core_question(q)
+    title = core.get("title") or q.get("title") or ""
+    description = core.get("description") or q.get("description") or ""
     
     normalized = {
         "id": qid,
@@ -1593,17 +1646,41 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["test_questions", "tournament_dryrun", "tournament_submit"],
-        required=True,
-        help="Run mode"
+        help="Run mode (deprecated, use specific flags instead)"
+    )
+    parser.add_argument(
+        "--live-test",
+        action="store_true",
+        help="Run live test on questions 578, 14333, 22427"
+    )
+    parser.add_argument(
+        "--submit-smoke-test",
+        type=int,
+        metavar="QID",
+        help="Submit smoke test for a single question ID"
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Actually submit forecasts (use with --submit-smoke-test)"
     )
     args = parser.parse_args()
     
-    if args.mode == "test_questions":
-        run_test_mode()
-    elif args.mode == "tournament_dryrun":
-        run_tournament(mode="dryrun", publish=False)
-    elif args.mode == "tournament_submit":
-        run_tournament(mode="submit", publish=True)
+    # Handle new flags first
+    if args.live_test:
+        run_live_test()
+    elif args.submit_smoke_test is not None:
+        run_submit_smoke_test(args.submit_smoke_test, publish=args.publish)
+    # Fall back to mode-based dispatch for backwards compatibility
+    elif args.mode:
+        if args.mode == "test_questions":
+            run_test_mode()
+        elif args.mode == "tournament_dryrun":
+            run_tournament(mode="dryrun", publish=False)
+        elif args.mode == "tournament_submit":
+            run_tournament(mode="submit", publish=True)
+    else:
+        parser.error("Must specify either --mode, --live-test, or --submit-smoke-test")
 
 if __name__ == "__main__":
     main()
