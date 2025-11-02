@@ -1,0 +1,55 @@
+name: Live Test (Long-Lived Questions)
+
+on:
+  workflow_dispatch:
+
+# Add concurrency group to prevent parallel runs
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live_test_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      
+      - name: Run live test
+        run: |
+          poetry run python - <<'PYEOF'
+          from main import run_live_test
+          run_live_test()
+          PYEOF
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+      
+      - name: Upload MC results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-results
+          path: mc_results.json
+      
+      - name: Upload MC reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-reasons
+          path: mc_reasons.txt
