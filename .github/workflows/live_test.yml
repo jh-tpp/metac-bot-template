@@ -53,3 +53,12 @@ jobs:
         with:
           name: mc-reasons
           path: mc_reasons.txt
+      
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            debug_q_*_raw.txt
+            debug_q_*.json
