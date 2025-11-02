@@ -5,6 +5,8 @@ import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Local modules
 from mc_worlds import run_mc_worlds, WORLD_PROMPT
@@ -29,6 +31,283 @@ ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
 METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
+
+# ========== HTTP Session and Retry ==========
+def _build_http_session():
+    """
+    Build a requests.Session with retry logic for robustness.
+    
+    Returns:
+        requests.Session configured with retry and headers
+    """
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST", "HEAD"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update({
+        "User-Agent": "metac-bot-template/1.0",
+        "Accept": "application/json"
+    })
+    return session
+
+# ========== Diagnostic Utilities ==========
+def _dprint(msg):
+    """Print message with immediate flush for GitHub Actions visibility."""
+    print(msg, flush=True)
+
+def _write_debug_files(prefix, raw_text, parsed_obj):
+    """
+    Write debug artifacts: raw response and parsed JSON.
+    
+    Args:
+        prefix: filename prefix (e.g., "debug_q_578_attempt1")
+        raw_text: raw response text/body
+        parsed_obj: parsed object (dict or other JSON-serializable)
+    """
+    try:
+        # Write raw text
+        raw_file = f"{prefix}_raw.txt"
+        with open(raw_file, "w", encoding="utf-8") as f:
+            f.write(raw_text)
+        _dprint(f"[DEBUG] Wrote {raw_file}")
+        
+        # Write parsed JSON
+        json_file = f"{prefix}.json"
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(parsed_obj, f, indent=2, ensure_ascii=False)
+        _dprint(f"[DEBUG] Wrote {json_file}")
+    except Exception as e:
+        _dprint(f"[ERROR] Failed to write debug files for {prefix}: {e}")
+
+def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, request_params, request_headers):
+    """
+    Log comprehensive request/response diagnostics.
+    
+    Args:
+        qid: Question ID
+        label: Label for this attempt (e.g., "attempt1")
+        resp: requests.Response object
+        raw_text: raw response body text
+        parsed_obj: parsed response dict
+        request_url: request URL
+        request_params: request params dict
+        request_headers: request headers dict
+    """
+    _dprint(f"\n{'='*80}")
+    _dprint(f"[DEBUG] Question {qid} - {label}")
+    _dprint(f"{'='*80}")
+    
+    # Request details
+    _dprint(f"[REQUEST]")
+    _dprint(f"  URL: {request_url}")
+    _dprint(f"  Params: {request_params}")
+    # Safe headers (exclude Authorization)
+    safe_headers = {k: v for k, v in request_headers.items() if k.lower() != "authorization"}
+    _dprint(f"  Headers: {safe_headers}")
+    
+    # Response details
+    _dprint(f"[RESPONSE]")
+    _dprint(f"  Final URL: {resp.url}")
+    _dprint(f"  Status: {resp.status_code} {resp.reason}")
+    _dprint(f"  Content-Type: {resp.headers.get('content-type', 'N/A')}")
+    _dprint(f"  Content-Length: {resp.headers.get('content-length', 'N/A')}")
+    _dprint(f"  Encoding: {resp.encoding}")
+    _dprint(f"  Redirects: {len(resp.history)} redirect(s)")
+    
+    # Body snippet (first 2KB)
+    _dprint(f"[BODY SNIPPET] First 2KB:")
+    snippet = raw_text[:2048]
+    _dprint(snippet)
+    if len(raw_text) > 2048:
+        _dprint(f"... ({len(raw_text) - 2048} more bytes)")
+    
+    # Parsed object keys
+    _dprint(f"[PARSED OBJECT]")
+    if isinstance(parsed_obj, dict):
+        _dprint(f"  Top-level keys: {list(parsed_obj.keys())}")
+        
+        # Check possibility/possibilities fields
+        possibility = parsed_obj.get("possibility")
+        possibilities = parsed_obj.get("possibilities")
+        
+        if possibility:
+            _dprint(f"  'possibility' present: type={type(possibility).__name__}")
+            if isinstance(possibility, dict):
+                _dprint(f"    possibility keys: {list(possibility.keys())}")
+                poss_type = possibility.get("type")
+                if poss_type:
+                    _dprint(f"    possibility.type: {repr(poss_type)}")
+        else:
+            _dprint(f"  'possibility' absent")
+        
+        if possibilities:
+            _dprint(f"  'possibilities' present: type={type(possibilities).__name__}")
+            if isinstance(possibilities, dict):
+                _dprint(f"    possibilities keys: {list(possibilities.keys())}")
+                poss_type = possibilities.get("type")
+                if poss_type:
+                    _dprint(f"    possibilities.type: {repr(poss_type)}")
+        else:
+            _dprint(f"  'possibilities' absent")
+        
+        # Check fallback type fields
+        fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
+        _dprint(f"  Fallback type fields:")
+        for field in fallback_fields:
+            val = parsed_obj.get(field)
+            if val is not None:
+                _dprint(f"    {field}: {repr(val)}")
+    else:
+        _dprint(f"  Parsed object is not a dict: {type(parsed_obj).__name__}")
+    
+    _dprint(f"{'='*80}\n")
+
+# ========== Robust Per-ID Hydration ==========
+def _request_with_logging(sess, url, params, qid, label):
+    """
+    Perform GET request with comprehensive logging and artifact writing.
+    
+    Args:
+        sess: requests.Session
+        url: request URL
+        params: query parameters dict
+        qid: Question ID
+        label: Label for this attempt (e.g., "attempt1")
+    
+    Returns:
+        dict: Parsed response or minimal parse-error dict
+    """
+    try:
+        resp = sess.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        raw_text = resp.text
+        
+        # Try to parse JSON
+        try:
+            parsed_obj = resp.json()
+        except Exception as parse_err:
+            _dprint(f"[ERROR] Failed to parse JSON for Q{qid} {label}: {parse_err}")
+            parsed_obj = {"_parse_error": str(parse_err), "_raw_snippet": raw_text[:500]}
+        
+        # Log comprehensive diagnostics
+        _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params, sess.headers)
+        
+        # Write debug files
+        prefix = f"debug_q_{qid}_{label}"
+        _write_debug_files(prefix, raw_text, parsed_obj)
+        
+        return parsed_obj
+        
+    except requests.exceptions.RequestException as e:
+        _dprint(f"[ERROR] Request failed for Q{qid} {label}: {e}")
+        error_dict = {"_request_error": str(e), "id": qid}
+        
+        # Try to get response details if available
+        if hasattr(e, "response") and e.response is not None:
+            try:
+                raw_text = e.response.text
+                error_dict["_status_code"] = e.response.status_code
+                error_dict["_raw_snippet"] = raw_text[:500]
+                
+                # Still log what we have
+                _debug_log_fetch(qid, label, e.response, raw_text, error_dict, url, params, sess.headers)
+                
+                # Write debug files even for errors
+                prefix = f"debug_q_{qid}_{label}"
+                _write_debug_files(prefix, raw_text, error_dict)
+            except Exception:
+                pass
+        
+        return error_dict
+
+def _hydrate_single_question(sess, qid):
+    """
+    Hydrate a single question with multiple API variant attempts.
+    
+    Tries four URL/param variants in order and merges fields into one object.
+    
+    Args:
+        sess: requests.Session
+        qid: Question ID
+    
+    Returns:
+        dict: Merged question data with best available fields
+    """
+    _dprint(f"\n[HYDRATE] Starting multi-attempt hydration for Q{qid}")
+    
+    base_url = METACULUS_API_BASE
+    
+    # Define four attempts with different URL/param combinations
+    attempts = [
+        {
+            "url": f"{base_url}{qid}/",
+            "params": {
+                "expand": "possibility",
+                "fields": "id,title,description,type,possibility,options"
+            },
+            "label": "attempt1_expand_fields"
+        },
+        {
+            "url": f"{base_url}{qid}/",
+            "params": {},
+            "label": "attempt2_plain_slash"
+        },
+        {
+            "url": f"{base_url}{qid}",
+            "params": {
+                "expand": "possibility",
+                "fields": "id,title,description,type,possibility,options"
+            },
+            "label": "attempt3_expand_fields_no_slash"
+        },
+        {
+            "url": f"{base_url}{qid}",
+            "params": {},
+            "label": "attempt4_plain_no_slash"
+        }
+    ]
+    
+    # Collect results from all attempts
+    results = []
+    for attempt in attempts:
+        _dprint(f"[HYDRATE] Q{qid} - {attempt['label']}: {attempt['url']} {attempt['params']}")
+        result = _request_with_logging(sess, attempt["url"], attempt["params"], qid, attempt["label"])
+        results.append(result)
+    
+    # Merge results: start with empty dict and overlay fields from each attempt
+    merged = {"id": qid}
+    
+    for i, result in enumerate(results):
+        if isinstance(result, dict) and not result.get("_request_error") and not result.get("_parse_error"):
+            # Valid result, merge fields
+            for key, value in result.items():
+                if key not in merged or merged.get(key) is None or (key == "possibility" and value):
+                    merged[key] = value
+    
+    # Log merged keys
+    _dprint(f"[HYDRATE] Q{qid} - Merged keys: {list(merged.keys())}")
+    
+    # Check for possibility in merged
+    if "possibility" in merged:
+        poss = merged["possibility"]
+        if isinstance(poss, dict):
+            _dprint(f"[HYDRATE] Q{qid} - Merged possibility keys: {list(poss.keys())}")
+            if "type" in poss:
+                _dprint(f"[HYDRATE] Q{qid} - Merged possibility.type: {repr(poss['type'])}")
+    
+    # Write final merged result
+    prefix = f"debug_q_{qid}_final"
+    _write_debug_files(prefix, json.dumps(merged, indent=2, ensure_ascii=False), merged)
+    
+    _dprint(f"[HYDRATE] Completed multi-attempt hydration for Q{qid}\n")
+    
+    return merged
 
 # ========== Tournament Question Fetcher ==========
 def _normalize_question_type(raw_type):
@@ -63,7 +342,7 @@ def _normalize_question_type(raw_type):
 def _infer_qtype_and_fields(q):
     """
     Infer question type and extract relevant fields from Metaculus API2 question object.
-    Inspects q.get("possibility") and falls back to legacy keys for test stubs.
+    Inspects q.get("possibility"), q.get("possibilities"), and falls back to legacy keys.
     
     Args:
         q: Question dict from Metaculus API2
@@ -77,27 +356,57 @@ def _infer_qtype_and_fields(q):
     """
     extra = {}
     
-    # Check possibility field first (API2 live schema)
+    # Check multiple sources for type in priority order
     possibility = q.get("possibility", {})
-    poss_type = possibility.get("type", "").lower() if possibility else ""
+    possibilities = q.get("possibilities", {})
     
-    # Fallback to legacy keys for test stubs
-    if not poss_type:
-        poss_type = q.get("possibility_type", "").lower()
-    if not poss_type:
-        poss_type = q.get("prediction_type", "").lower()
+    # Try to get type from various sources
+    poss_type = ""
+    candidates_tried = []
+    
+    # Priority 1: possibility.type
+    if possibility and isinstance(possibility, dict):
+        poss_type = possibility.get("type", "").lower()
+        if poss_type:
+            candidates_tried.append(f"possibility.type={repr(poss_type)}")
+    
+    # Priority 2: possibilities.type
+    if not poss_type and possibilities and isinstance(possibilities, dict):
+        poss_type = possibilities.get("type", "").lower()
+        if poss_type:
+            candidates_tried.append(f"possibilities.type={repr(poss_type)}")
+    
+    # Priority 3: top-level type
     if not poss_type:
         poss_type = q.get("type", "").lower()
+        if poss_type:
+            candidates_tried.append(f"type={repr(poss_type)}")
+    
+    # Priority 4+: legacy/fallback fields
+    fallback_fields = ["possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
+    for field in fallback_fields:
+        if not poss_type:
+            poss_type = q.get(field, "").lower()
+            if poss_type:
+                candidates_tried.append(f"{field}={repr(poss_type)}")
     
     # Normalize possibility.type values to canonical types
     # Binary types
     if poss_type in ["binary", "bool", "boolean"]:
         qtype = "binary"
-    # Multiple choice types
-    elif poss_type in ["one_of", "categorical", "multiple_choice"]:
+    # Multiple choice types (extended variants)
+    elif poss_type in ["one_of", "categorical", "multiple_choice", "multiplechoice", "mc"]:
         qtype = "multiple_choice"
-        # Extract options
-        options_data = possibility.get("options", [])
+        
+        # Extract options from possibility or possibilities
+        options_data = []
+        if possibility and isinstance(possibility, dict):
+            options_data = possibility.get("options", [])
+        if not options_data and possibilities and isinstance(possibilities, dict):
+            options_data = possibilities.get("options", [])
+        if not options_data:
+            options_data = q.get("options", [])
+        
         options = []
         for i, opt in enumerate(options_data):
             if isinstance(opt, dict):
@@ -109,26 +418,47 @@ def _infer_qtype_and_fields(q):
             else:
                 options.append(f"opt_{i}")
         extra["options"] = options
-    # Numeric types (continuous, float, integer, number, linear, log, numeric)
-    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log"]:
+        
+    # Numeric types (extended variants)
+    elif poss_type in ["continuous", "float", "integer", "number", "numeric", "linear", "log", "date", "discrete"]:
         qtype = "numeric"
-        # Extract numeric bounds - try multiple field names
+        
+        # Extract numeric bounds - try multiple field names from both possibility and possibilities
         numeric_bounds = {}
         
-        # Try possibility.range first
-        if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
-            numeric_bounds["min"] = possibility["range"][0]
-            numeric_bounds["max"] = possibility["range"][1]
-        # Try possibility.bounds
-        elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
-            numeric_bounds["min"] = possibility["bounds"][0]
-            numeric_bounds["max"] = possibility["bounds"][1]
-        # Try direct min/max in possibility
-        else:
-            if "min" in possibility:
-                numeric_bounds["min"] = possibility["min"]
-            if "max" in possibility:
-                numeric_bounds["max"] = possibility["max"]
+        # Try possibility first
+        if possibility and isinstance(possibility, dict):
+            # Try possibility.range
+            if "range" in possibility and isinstance(possibility["range"], (list, tuple)) and len(possibility["range"]) >= 2:
+                numeric_bounds["min"] = possibility["range"][0]
+                numeric_bounds["max"] = possibility["range"][1]
+            # Try possibility.bounds
+            elif "bounds" in possibility and isinstance(possibility["bounds"], (list, tuple)) and len(possibility["bounds"]) >= 2:
+                numeric_bounds["min"] = possibility["bounds"][0]
+                numeric_bounds["max"] = possibility["bounds"][1]
+            # Try direct min/max in possibility
+            else:
+                if "min" in possibility:
+                    numeric_bounds["min"] = possibility["min"]
+                if "max" in possibility:
+                    numeric_bounds["max"] = possibility["max"]
+            
+            # Extract unit and scale from possibility
+            if "unit" in possibility:
+                numeric_bounds["unit"] = possibility["unit"]
+            if "scale" in possibility:
+                numeric_bounds["scale"] = possibility["scale"]
+        
+        # Try possibilities if no bounds found yet
+        if not numeric_bounds and possibilities and isinstance(possibilities, dict):
+            # Try possibilities.range
+            if "range" in possibilities and isinstance(possibilities["range"], (list, tuple)) and len(possibilities["range"]) >= 2:
+                numeric_bounds["min"] = possibilities["range"][0]
+                numeric_bounds["max"] = possibilities["range"][1]
+            # Try possibilities.bounds
+            elif "bounds" in possibilities and isinstance(possibilities["bounds"], (list, tuple)) and len(possibilities["bounds"]) >= 2:
+                numeric_bounds["min"] = possibilities["bounds"][0]
+                numeric_bounds["max"] = possibilities["bounds"][1]
         
         # Fallback to legacy keys at top level
         if not numeric_bounds:
@@ -139,28 +469,18 @@ def _infer_qtype_and_fields(q):
                 numeric_bounds["min"] = q["range_min"]
                 numeric_bounds["max"] = q["range_max"]
         
-        # Extract unit and scale
-        if "unit" in possibility:
-            numeric_bounds["unit"] = possibility["unit"]
-        if "scale" in possibility:
-            numeric_bounds["scale"] = possibility["scale"]
-        
-        if numeric_bounds:
-            extra["numeric_bounds"] = numeric_bounds
-    # Date types (treated as numeric)
-    elif poss_type == "date":
-        qtype = "numeric"  # Dates are treated as numeric (timestamp)
-        # Extract date bounds if present
-        numeric_bounds = {}
-        if "min" in possibility:
-            numeric_bounds["min"] = possibility["min"]
-        if "max" in possibility:
-            numeric_bounds["max"] = possibility["max"]
         if numeric_bounds:
             extra["numeric_bounds"] = numeric_bounds
     else:
-        # Unknown type
+        # Unknown type - log what we tried
         qtype = "unknown"
+        _dprint(f"[WARN] Could not infer question type. Candidates tried: {candidates_tried}")
+        
+        # Log keys present in possibility/possibilities for debugging
+        if possibility and isinstance(possibility, dict):
+            _dprint(f"  possibility keys: {list(possibility.keys())}")
+        if possibilities and isinstance(possibilities, dict):
+            _dprint(f"  possibilities keys: {list(possibilities.keys())}")
     
     return (qtype, extra)
 
@@ -879,40 +1199,59 @@ def _hydrate_possibility(qid, timeout=20):
 def run_live_test():
     """
     Live test on three long-lived Metaculus questions (578, 14333, 22427).
-    Fetches questions, runs pipeline, writes artifacts. Never submits.
+    Uses multi-attempt hydration with comprehensive diagnostics and artifact writing.
     """
-    print("[LIVE TEST] Starting...")
+    _dprint("[LIVE TEST] Starting with comprehensive diagnostics...")
     
-    # Fetch three long-lived questions
+    # Test question IDs
     test_qids = [578, 14333, 22427]  # binary, numeric, multiple_choice
-    raw_questions = []
     
+    # Build HTTP session with retry logic
+    sess = _build_http_session()
+    _dprint(f"[LIVE TEST] Built HTTP session with retry logic")
+    
+    # Hydrate questions with multi-attempt strategy
+    raw_questions = []
     for qid in test_qids:
-        print(f"[INFO] Fetching question {qid}...")
-        q = _hydrate_possibility(qid, timeout=20)
-        if q:
-            raw_questions.append(q)
-        else:
-            print(f"[WARN] Could not fetch question {qid}, skipping")
+        _dprint(f"\n[LIVE TEST] Hydrating question {qid}...")
+        merged_q = _hydrate_single_question(sess, qid)
+        raw_questions.append(merged_q)
     
     if not raw_questions:
-        print("[ERROR] No questions fetched. Aborting live test.")
+        _dprint("[ERROR] No questions hydrated. Aborting live test.")
         return
     
-    # Normalize questions
+    _dprint(f"\n[LIVE TEST] Successfully hydrated {len(raw_questions)} questions")
+    
+    # Normalize questions with broadened type inference
     questions = []
     for q in raw_questions:
         qid = q.get("id")
         if not qid:
+            _dprint(f"[WARN] Skipping question without ID")
             continue
         
+        _dprint(f"\n[NORMALIZE] Q{qid} - Starting normalization")
+        _dprint(f"[NORMALIZE] Q{qid} - Merged keys: {list(q.keys())}")
+        
+        # Log presence of fallback type fields
+        fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
+        _dprint(f"[NORMALIZE] Q{qid} - Fallback type fields present:")
+        for field in fallback_fields:
+            val = q.get(field)
+            if val is not None:
+                _dprint(f"  {field}: {repr(val)}")
+        
+        # Infer type with broadened logic
         qtype, extra = _infer_qtype_and_fields(q)
         
         if qtype == "unknown":
-            print(f"[SKIP] Unknown type for Q{qid}")
+            _dprint(f"[SKIP] Q{qid} - Unknown type after broadened inference")
+            _dprint(f"[SKIP] Q{qid} - This question will be skipped but debug artifacts are available")
             continue
         
-        print(f"[INFO] Q{qid} inferred type: {qtype}")
+        _dprint(f"[NORMALIZE] Q{qid} - Inferred type: {qtype}")
+        _dprint(f"[NORMALIZE] Q{qid} - Extra fields: {extra}")
         
         title = q.get("title") or q.get("name", "")
         description = q.get("description", "")
@@ -928,6 +1267,7 @@ def run_live_test():
         if qtype == "multiple_choice":
             options = extra.get("options", [])
             normalized["options"] = [{"name": name} for name in options]
+            _dprint(f"[NORMALIZE] Q{qid} - Multiple choice with {len(options)} options")
         else:
             normalized["options"] = []
         
@@ -943,8 +1283,20 @@ def run_live_test():
                     normalized["max"] = float(numeric_bounds["max"])
                 except (ValueError, TypeError):
                     normalized["max"] = numeric_bounds["max"]
+            _dprint(f"[NORMALIZE] Q{qid} - Numeric bounds: {numeric_bounds}")
         
         questions.append(normalized)
+        _dprint(f"[NORMALIZE] Q{qid} - Successfully normalized\n")
+    
+    if not questions:
+        _dprint("\n[ERROR] Zero questions normalized successfully!")
+        _dprint("[ERROR] Please review debug artifacts:")
+        _dprint("  - debug_q_*_attempt*_raw.txt (raw API responses)")
+        _dprint("  - debug_q_*_attempt*.json (parsed JSON)")
+        _dprint("  - debug_q_*_final.json (merged results)")
+        return
+    
+    _dprint(f"\n[LIVE TEST] Successfully normalized {len(questions)} questions. Proceeding with pipeline...")
     
     # Fetch AskNews facts
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
@@ -958,9 +1310,9 @@ def run_live_test():
         qid = q["id"]
         facts = news.get(qid, [])
         
-        print(f"\n[INFO] Processing Q{qid}: {q['title']}")
-        print(f"  Type: {q['type']}")
-        print(f"  AskNews facts: {len(facts)}")
+        _dprint(f"\n[PIPELINE] Processing Q{qid}: {q['title']}")
+        _dprint(f"  Type: {q['type']}")
+        _dprint(f"  AskNews facts: {len(facts)}")
         
         mc_out = run_mc_worlds(
             question_obj=q,
@@ -988,11 +1340,16 @@ def run_live_test():
     # Write artifacts
     with open("mc_results.json", "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
+    _dprint("[LIVE TEST] Wrote mc_results.json")
     
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_reasons))
+    _dprint("[LIVE TEST] Wrote mc_reasons.txt")
     
-    print("\n[LIVE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+    _dprint("\n[LIVE TEST] Complete!")
+    _dprint(f"  Processed: {len(questions)} questions")
+    _dprint(f"  Artifacts: mc_results.json, mc_reasons.txt")
+    _dprint(f"  Debug files: debug_q_*_*.txt, debug_q_*.json")
 
 def run_submit_smoke_test(test_qid, publish=False):
     """
