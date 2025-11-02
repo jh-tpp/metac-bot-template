@@ -101,30 +101,41 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
     if isinstance(parsed_obj, dict):
         print(f"\nTop-level keys: {list(parsed_obj.keys())}", flush=True)
         
-        # Check for possibility/possibilities
-        if "possibility" in parsed_obj:
-            poss = parsed_obj["possibility"]
+        # Pivot into nested 'question' object if present (v2 API)
+        core = parsed_obj.get("question", parsed_obj)
+        if core != parsed_obj and isinstance(core, dict):
+            print(f"\nNested 'question' object found with keys: {list(core.keys())}", flush=True)
+        else:
+            core = parsed_obj
+        
+        # Check for possibility/possibilities in core
+        if "possibility" in core:
+            poss = core["possibility"]
             poss_type = poss.get("type", "N/A") if isinstance(poss, dict) else "N/A"
-            print(f"  possibility present: type={poss_type}", flush=True)
+            print(f"  core.possibility present: type={poss_type}", flush=True)
             if isinstance(poss, dict):
-                print(f"  possibility keys: {list(poss.keys())}", flush=True)
+                print(f"  core.possibility keys: {list(poss.keys())}", flush=True)
         else:
-            print(f"  possibility: NOT PRESENT", flush=True)
+            print(f"  core.possibility: NOT PRESENT", flush=True)
         
-        if "possibilities" in parsed_obj:
-            poss_list = parsed_obj["possibilities"]
-            print(f"  possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
-            if isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
-                print(f"  possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
+        if "possibilities" in core:
+            poss_list = core["possibilities"]
+            print(f"  core.possibilities present: {type(poss_list)}, length={len(poss_list) if isinstance(poss_list, (list, tuple)) else 'N/A'}", flush=True)
+            if isinstance(poss_list, dict):
+                poss_type = poss_list.get("type", "N/A")
+                print(f"  core.possibilities.type: {poss_type}", flush=True)
+                print(f"  core.possibilities keys: {list(poss_list.keys())}", flush=True)
+            elif isinstance(poss_list, list) and len(poss_list) > 0 and isinstance(poss_list[0], dict):
+                print(f"  core.possibilities[0] keys: {list(poss_list[0].keys())}", flush=True)
         else:
-            print(f"  possibilities: NOT PRESENT", flush=True)
+            print(f"  core.possibilities: NOT PRESENT", flush=True)
         
-        # Check for fallback type fields
+        # Check for fallback type fields in core
         fallback_fields = ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]
-        print(f"  Fallback type fields:", flush=True)
+        print(f"  Core type fields:", flush=True)
         for field in fallback_fields:
-            if field in parsed_obj:
-                print(f"    {field}: {parsed_obj[field]}", flush=True)
+            if field in core:
+                print(f"    core.{field}: {core[field]}", flush=True)
     else:
         print(f"\nParsed response is not a dict: {type(parsed_obj)}", flush=True)
     
@@ -154,11 +165,174 @@ def _normalize_question_type(raw_type):
         "numerical": "numeric",
         "continuous": "numeric",
         "date": "numeric",  # dates can be treated as numeric
+        "discrete": "multiple_choice",  # discrete can be multiple_choice
     }
     
     # Normalize: lowercase and remove hyphens/underscores
     normalized_key = raw_type.lower().replace("-", "").replace("_", "")
     return type_mapping.get(normalized_key, "")
+
+def _normalize_question_object(raw):
+    """
+    Normalize a Metaculus API v2 response to a consistent format.
+    Handles the nested 'question' object that v2 returns.
+    
+    Args:
+        raw: Raw API response dict (may have 'question' nested object)
+    
+    Returns:
+        Normalized dict with id, title, description, type, options, bounds, raw
+        or None if normalization fails
+    """
+    if not raw or not isinstance(raw, dict):
+        return None
+    
+    # Pivot into nested 'question' object if present (v2 API)
+    core = raw.get("question", raw) or {}
+    if not isinstance(core, dict):
+        return None
+    
+    # Extract ID - can be at top level or in core
+    qid = raw.get("id") or core.get("id")
+    if not qid:
+        return None
+    
+    # Extract title and description with fallbacks
+    title = core.get("title") or core.get("name") or raw.get("title") or raw.get("name", "")
+    description = core.get("description") or raw.get("description", "")
+    
+    # Read possibilities/possibility and infer type
+    poss = core.get("possibilities") or core.get("possibility") or {}
+    
+    # Handle possibilities being a list or dict
+    if isinstance(poss, list) and len(poss) > 0:
+        poss_item = poss[0] if isinstance(poss[0], dict) else {}
+    elif isinstance(poss, dict):
+        poss_item = poss
+    else:
+        poss_item = {}
+    
+    # Get type from possibilities or fallback to core/raw
+    ptype = (poss_item.get("type") or core.get("type") or raw.get("type") or "").lower()
+    
+    # Map Metaculus types to internal types
+    qtype = "unknown"
+    options = []
+    numeric_bounds = {}
+    
+    if ptype in ["binary", "bool", "boolean"]:
+        qtype = "binary"
+    
+    elif ptype in ["discrete", "one_of", "oneof", "categorical", "multiple_choice", "multiple-choice"]:
+        # Multiple choice - extract options from outcomes
+        qtype = "multiple_choice"
+        
+        # Try to get outcomes from possibilities
+        outcomes_data = []
+        if isinstance(poss, dict):
+            outcomes_data = poss.get("outcomes") or poss.get("options") or []
+        elif isinstance(poss, list) and len(poss) > 0 and isinstance(poss[0], dict):
+            outcomes_data = poss[0].get("outcomes") or poss[0].get("options") or []
+        
+        # Fallback to core.options or raw.options
+        if not outcomes_data:
+            outcomes_data = core.get("options") or raw.get("options") or []
+        
+        # Extract option names/labels
+        for i, opt in enumerate(outcomes_data):
+            if isinstance(opt, dict):
+                name = opt.get("name") or opt.get("label") or opt.get("title") or f"opt_{i}"
+                options.append(name)
+            elif isinstance(opt, str):
+                options.append(opt)
+            else:
+                options.append(f"opt_{i}")
+    
+    elif ptype in ["continuous", "float", "integer", "number", "numeric", "linear", "log", "date"]:
+        # Numeric - extract bounds from range or min/max
+        qtype = "numeric"
+        
+        # Try poss_item.range first
+        if "range" in poss_item and isinstance(poss_item["range"], (list, tuple)) and len(poss_item["range"]) >= 2:
+            numeric_bounds["min"] = poss_item["range"][0]
+            numeric_bounds["max"] = poss_item["range"][1]
+        # Try poss_item.min/max
+        elif "min" in poss_item and "max" in poss_item:
+            numeric_bounds["min"] = poss_item["min"]
+            numeric_bounds["max"] = poss_item["max"]
+        # Try poss_item.bounds
+        elif "bounds" in poss_item and isinstance(poss_item["bounds"], (list, tuple)) and len(poss_item["bounds"]) >= 2:
+            numeric_bounds["min"] = poss_item["bounds"][0]
+            numeric_bounds["max"] = poss_item["bounds"][1]
+        
+        # Fallback to legacy keys at core level
+        if not numeric_bounds:
+            if "numerical_range" in core and isinstance(core["numerical_range"], (list, tuple)) and len(core["numerical_range"]) >= 2:
+                numeric_bounds["min"] = core["numerical_range"][0]
+                numeric_bounds["max"] = core["numerical_range"][1]
+            elif "range_min" in core and "range_max" in core:
+                numeric_bounds["min"] = core["range_min"]
+                numeric_bounds["max"] = core["range_max"]
+            elif "min" in core and "max" in core:
+                numeric_bounds["min"] = core["min"]
+                numeric_bounds["max"] = core["max"]
+        
+        # Fallback to raw level
+        if not numeric_bounds:
+            if "numerical_range" in raw and isinstance(raw["numerical_range"], (list, tuple)) and len(raw["numerical_range"]) >= 2:
+                numeric_bounds["min"] = raw["numerical_range"][0]
+                numeric_bounds["max"] = raw["numerical_range"][1]
+            elif "range_min" in raw and "range_max" in raw:
+                numeric_bounds["min"] = raw["range_min"]
+                numeric_bounds["max"] = raw["range_max"]
+            elif "min" in raw and "max" in raw:
+                numeric_bounds["min"] = raw["min"]
+                numeric_bounds["max"] = raw["max"]
+        
+        # Extract unit and scale
+        if "unit" in poss_item:
+            numeric_bounds["unit"] = poss_item["unit"]
+        if "scale" in poss_item:
+            numeric_bounds["scale"] = poss_item["scale"]
+    
+    else:
+        # Log diagnostic info for unknown types
+        print(f"[NORMALIZE UNKNOWN] Q{qid}: Could not map type '{ptype}' from possibilities.type", flush=True)
+        if poss_item:
+            print(f"[NORMALIZE UNKNOWN] Q{qid}: possibilities keys: {list(poss_item.keys())}", flush=True)
+        print(f"[NORMALIZE UNKNOWN] Q{qid}: core keys: {list(core.keys())}", flush=True)
+        return None
+    
+    # Build normalized result
+    normalized = {
+        "id": qid,
+        "type": qtype,
+        "title": title,
+        "description": description,
+        "url": f"https://www.metaculus.com/questions/{qid}/",
+        "raw": raw
+    }
+    
+    # Add options for multiple choice
+    if qtype == "multiple_choice":
+        normalized["options"] = [{"name": name} for name in options]
+    else:
+        normalized["options"] = []
+    
+    # Add bounds for numeric
+    if qtype == "numeric" and numeric_bounds:
+        if "min" in numeric_bounds:
+            try:
+                normalized["min"] = float(numeric_bounds["min"])
+            except (ValueError, TypeError):
+                normalized["min"] = numeric_bounds["min"]
+        if "max" in numeric_bounds:
+            try:
+                normalized["max"] = float(numeric_bounds["max"])
+            except (ValueError, TypeError):
+                normalized["max"] = numeric_bounds["max"]
+    
+    return normalized
 
 def _infer_qtype_and_fields(q):
     """
@@ -347,9 +521,7 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
         "search": filter_str,
         "status": "open",
         "limit": 1000,
-        "order_by": "-activity",
-        "expand": "possibility",
-        "fields": "id,title,description,possibility"
+        "order_by": "-activity"
     }
     
     try:
@@ -361,95 +533,33 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
         raw_questions = data.get("results", [])
         print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
         
-        # Identify questions missing 'possibility' field and hydrate them
-        questions_to_hydrate = []
-        for q in raw_questions:
-            if not q.get("possibility"):
-                questions_to_hydrate.append(q.get("id"))
-        
-        if questions_to_hydrate:
-            print(f"[INFO] Hydrating possibility for {len(questions_to_hydrate)} questions (per-ID fetch)...")
-            for qid in questions_to_hydrate:
-                try:
-                    hydrate_url = f"{METACULUS_API_BASE}{qid}/?expand=possibility"
-                    hydrate_resp = requests.get(hydrate_url, timeout=15)
-                    hydrate_resp.raise_for_status()
-                    hydrated_data = hydrate_resp.json()
-                    
-                    # Find the question in raw_questions and update its possibility field
-                    for q in raw_questions:
-                        if q.get("id") == qid:
-                            q["possibility"] = hydrated_data.get("possibility", {})
-                            break
-                except Exception as e:
-                    print(f"[WARN] Failed to hydrate question {qid}: {e}")
-        
         # Debug smoke-print: show sample of first 5 questions
         print(f"[DEBUG] Sample of first {min(5, len(raw_questions))} questions:")
         for i, q in enumerate(raw_questions[:5]):
             qid = q.get("id", "?")
-            poss = q.get("possibility", {})
-            poss_type = poss.get("type", "") if poss else ""
-            q_type = q.get("type", "")
-            print(f"  ({qid}, {repr(poss_type)}, {repr(q_type)})")
+            # Check if question object is nested
+            core = q.get("question", q)
+            poss = core.get("possibilities") or core.get("possibility") or {}
+            if isinstance(poss, dict):
+                poss_type = poss.get("type", "")
+            elif isinstance(poss, list) and len(poss) > 0 and isinstance(poss[0], dict):
+                poss_type = poss[0].get("type", "")
+            else:
+                poss_type = ""
+            print(f"  Q{qid}: possibilities.type={repr(poss_type)}")
         
-        # Normalize to pipeline format
+        # Normalize to pipeline format using new normalizer
         questions = []
         skipped_count = 0
         
         for q in raw_questions:
-            qid = q.get("id")
-            if not qid:
-                continue
+            normalized = _normalize_question_object(q)
             
-            # Use new helper to infer question type and extract fields
-            qtype, extra = _infer_qtype_and_fields(q)
-            
-            if qtype == "unknown":
-                # Unknown/unmappable type - skip question with explicit source info
-                poss = q.get("possibility", {})
-                poss_type = poss.get("type", "") if poss else ""
-                raw_type = q.get("type", "")
-                type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
-                print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
+            if normalized is None:
+                qid = q.get("id", "?")
+                print(f"[SKIP] Could not normalize Q{qid}")
                 skipped_count += 1
                 continue
-            
-            # Extract title and description
-            title = q.get("title") or q.get("name", "")
-            description = q.get("description", "")
-            
-            # Build normalized question
-            normalized = {
-                "id": qid,
-                "type": qtype,
-                "title": title,
-                "description": description,
-                "url": f"https://www.metaculus.com/questions/{qid}/"
-            }
-            
-            # Handle multiple choice options
-            if qtype == "multiple_choice":
-                options = extra.get("options", [])
-                normalized["options"] = [{"name": name} for name in options]
-            else:
-                normalized["options"] = []
-            
-            # Handle numeric bounds
-            if qtype == "numeric":
-                numeric_bounds = extra.get("numeric_bounds", {})
-                if "min" in numeric_bounds:
-                    try:
-                        normalized["min"] = float(numeric_bounds["min"])
-                    except (ValueError, TypeError):
-                        # For date strings, keep as-is (will be handled by downstream code)
-                        normalized["min"] = numeric_bounds["min"]
-                if "max" in numeric_bounds:
-                    try:
-                        normalized["max"] = float(numeric_bounds["max"])
-                    except (ValueError, TypeError):
-                        # For date strings, keep as-is (will be handled by downstream code)
-                        normalized["max"] = numeric_bounds["max"]
             
             questions.append(normalized)
         
@@ -1038,31 +1148,15 @@ def _hydrate_question_with_diagnostics(qid):
         "User-Agent": "metac-bot-template/1.0"
     }
     
-    # Try multiple variants in order
+    # Try multiple variants in order (remove expand/fields from most attempts)
     attempts = [
         {
-            "label": "attempt 1: with trailing slash, expand=possibility, fields",
-            "url": f"{METACULUS_API_BASE}{qid}/",
-            "params": {
-                "expand": "possibility",
-                "fields": "id,title,description,type,possibility,options"
-            }
-        },
-        {
-            "label": "attempt 2: with trailing slash, plain detail",
+            "label": "attempt 1: with trailing slash, plain detail",
             "url": f"{METACULUS_API_BASE}{qid}/",
             "params": {}
         },
         {
-            "label": "attempt 3: no trailing slash, expand=possibility, fields",
-            "url": f"{METACULUS_API_BASE}{qid}",
-            "params": {
-                "expand": "possibility",
-                "fields": "id,title,description,type,possibility,options"
-            }
-        },
-        {
-            "label": "attempt 4: no trailing slash, plain detail",
+            "label": "attempt 2: no trailing slash, plain detail",
             "url": f"{METACULUS_API_BASE}{qid}",
             "params": {}
         }
@@ -1092,24 +1186,9 @@ def _hydrate_question_with_diagnostics(qid):
             prefix = f"debug_q_{qid}_att{i}"
             _write_debug_files(prefix, raw_text, parsed_obj)
             
-            # Merge into working object
+            # Store first successful fetch
             if merged_data is None:
                 merged_data = parsed_obj
-            else:
-                # Merge possibility/possibilities if present
-                if "possibility" in parsed_obj and parsed_obj["possibility"]:
-                    merged_data["possibility"] = parsed_obj["possibility"]
-                    print(f"[HYDRATE] Q{qid} - Merged possibility from {label}", flush=True)
-                
-                if "possibilities" in parsed_obj and parsed_obj["possibilities"]:
-                    merged_data["possibilities"] = parsed_obj["possibilities"]
-                    print(f"[HYDRATE] Q{qid} - Merged possibilities from {label}", flush=True)
-                
-                # Merge top-level type fields
-                for field in ["type", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
-                    if field in parsed_obj and parsed_obj[field]:
-                        merged_data[field] = parsed_obj[field]
-                        print(f"[HYDRATE] Q{qid} - Merged {field} from {label}", flush=True)
             
             print(f"[HYDRATE] Q{qid} - {label} SUCCESS", flush=True)
             
@@ -1123,18 +1202,34 @@ def _hydrate_question_with_diagnostics(qid):
             print(f"[HYDRATE] Q{qid} - {label} FAILED: {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
     
-    # Write final merged object
+    # Write final merged object and normalize it
     if merged_data:
         print(f"\n[HYDRATE] Q{qid} - Writing final merged object", flush=True)
         final_prefix = f"debug_q_{qid}_final"
         try:
-            final_file = f"{final_prefix}.json"
-            with open(final_file, "w", encoding="utf-8") as f:
-                json.dump(merged_data, f, indent=2, ensure_ascii=False)
-            print(f"[HYDRATE] Q{qid} - Wrote final merged object to {final_file}", flush=True)
-            print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(merged_data.keys())}", flush=True)
+            # Use new normalizer to get standardized format
+            normalized = _normalize_question_object(merged_data)
+            
+            if normalized:
+                final_file = f"{final_prefix}.json"
+                with open(final_file, "w", encoding="utf-8") as f:
+                    json.dump(normalized, f, indent=2, ensure_ascii=False)
+                print(f"[HYDRATE] Q{qid} - Wrote normalized object to {final_file}", flush=True)
+                print(f"[HYDRATE] Q{qid} - Normalized type: {normalized.get('type')}", flush=True)
+                if normalized.get('type') == 'numeric' and ('min' in normalized or 'max' in normalized):
+                    print(f"[HYDRATE] Q{qid} - Numeric bounds: [{normalized.get('min')}, {normalized.get('max')}]", flush=True)
+                elif normalized.get('type') == 'multiple_choice':
+                    print(f"[HYDRATE] Q{qid} - Options: {[opt['name'] for opt in normalized.get('options', [])]}", flush=True)
+            else:
+                print(f"[HYDRATE] Q{qid} - Normalization failed", flush=True)
+                # Still write raw merged data for debugging
+                final_file = f"{final_prefix}_raw.json"
+                with open(final_file, "w", encoding="utf-8") as f:
+                    json.dump(merged_data, f, indent=2, ensure_ascii=False)
+                print(f"[HYDRATE] Q{qid} - Wrote raw merged object to {final_file}", flush=True)
+                
         except Exception as e:
-            print(f"[ERROR] Failed to write final merged object for Q{qid}: {e}", flush=True)
+            print(f"[ERROR] Failed to write final object for Q{qid}: {e}", flush=True)
             traceback.print_exc()
     else:
         print(f"[HYDRATE] Q{qid} - FAILED: No successful fetches", flush=True)
@@ -1173,52 +1268,24 @@ def run_live_test():
         print("  - debug_q_{id}_final.json (final merged objects)", flush=True)
         return
     
-    # Normalize questions
+    # Normalize questions using new normalizer
     print(f"\n[LIVE TEST] Normalizing {len(raw_questions)} fetched questions...", flush=True)
     questions = []
     for q in raw_questions:
-        qid = q.get("id")
-        if not qid:
+        normalized = _normalize_question_object(q)
+        
+        if normalized is None:
+            qid = q.get("id", "?")
+            print(f"[SKIP] Could not normalize Q{qid} - check debug artifacts", flush=True)
             continue
         
-        qtype, extra = _infer_qtype_and_fields(q)
-        
-        if qtype == "unknown":
-            print(f"[SKIP] Unknown type for Q{qid} - check debug artifacts", flush=True)
-            continue
-        
-        print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
-        
-        title = q.get("title") or q.get("name", "")
-        description = q.get("description", "")
-        
-        normalized = {
-            "id": qid,
-            "type": qtype,
-            "title": title,
-            "description": description,
-            "url": f"https://www.metaculus.com/questions/{qid}/"
-        }
+        qid = normalized["id"]
+        qtype = normalized["type"]
+        print(f"[INFO] Q{qid} normalized type: {qtype}", flush=True)
         
         if qtype == "multiple_choice":
-            options = extra.get("options", [])
-            normalized["options"] = [{"name": name} for name in options]
             print(f"[INFO] Q{qid} options: {[opt['name'] for opt in normalized['options']]}", flush=True)
-        else:
-            normalized["options"] = []
-        
-        if qtype == "numeric":
-            numeric_bounds = extra.get("numeric_bounds", {})
-            if "min" in numeric_bounds:
-                try:
-                    normalized["min"] = float(numeric_bounds["min"])
-                except (ValueError, TypeError):
-                    normalized["min"] = numeric_bounds["min"]
-            if "max" in numeric_bounds:
-                try:
-                    normalized["max"] = float(numeric_bounds["max"])
-                except (ValueError, TypeError):
-                    normalized["max"] = numeric_bounds["max"]
+        elif qtype == "numeric":
             if "min" in normalized and "max" in normalized:
                 print(f"[INFO] Q{qid} numeric bounds: [{normalized['min']}, {normalized['max']}]", flush=True)
         
@@ -1312,45 +1379,25 @@ def run_submit_smoke_test(test_qid, publish=False):
         print(f"[ERROR] Could not fetch question {test_qid}. Aborting.", flush=True)
         return
     
-    # Normalize question
-    qid = q.get("id")
-    qtype, extra = _infer_qtype_and_fields(q)
+    # Normalize question using new normalizer
+    # Note: _hydrate_question_with_diagnostics now returns normalized object directly
+    normalized = q
     
-    if qtype == "unknown":
+    if not normalized or not isinstance(normalized, dict):
+        print(f"[ERROR] Could not normalize question {test_qid}. Aborting.", flush=True)
+        return
+    
+    qid = normalized.get("id")
+    qtype = normalized.get("type")
+    
+    if not qtype or qtype == "unknown":
         print(f"[ERROR] Unknown question type for Q{qid}. Aborting.", flush=True)
         return
     
-    print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
+    print(f"[INFO] Q{qid} normalized type: {qtype}", flush=True)
     
-    title = q.get("title") or q.get("name", "")
-    description = q.get("description", "")
-    
-    normalized = {
-        "id": qid,
-        "type": qtype,
-        "title": title,
-        "description": description,
-        "url": f"https://www.metaculus.com/questions/{qid}/"
-    }
-    
-    if qtype == "multiple_choice":
-        options = extra.get("options", [])
-        normalized["options"] = [{"name": name} for name in options]
-    else:
-        normalized["options"] = []
-    
-    if qtype == "numeric":
-        numeric_bounds = extra.get("numeric_bounds", {})
-        if "min" in numeric_bounds:
-            try:
-                normalized["min"] = float(numeric_bounds["min"])
-            except (ValueError, TypeError):
-                normalized["min"] = numeric_bounds["min"]
-        if "max" in numeric_bounds:
-            try:
-                normalized["max"] = float(numeric_bounds["max"])
-            except (ValueError, TypeError):
-                normalized["max"] = numeric_bounds["max"]
+    title = normalized.get("title", "")
+    description = normalized.get("description", "")
     
     # Fetch AskNews facts
     qid_to_text = {qid: title + " " + description}
