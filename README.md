@@ -22,6 +22,37 @@ The bot should just work as is at this point. You can disable the workflow by cl
 ## API Keys
 Instructions for getting your METACULUS_TOKEN, OPENROUTER_API_KEY, or optional search provider API keys (AskNews, Exa, Perplexity, etc) are listed on the "Getting Started" section of the [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#GettingStarted:~:text=AI%20Forecasting%20Benchmark%3F-,Getting%20Started,-We%27ve%20published%20a) page.
 
+## Disabling AskNews (optional)
+The bot supports an `ASKNEWS_ENABLED` environment variable to completely disable AskNews calls while keeping the bot fully functional. This is useful for:
+- Testing without AskNews credentials
+- Reducing API costs
+- Using alternative research providers (EXA, Perplexity)
+- Debugging forecast logic without network calls
+
+### Usage
+Set the `ASKNEWS_ENABLED` environment variable to disable AskNews:
+
+**In `.env` file:**
+```bash
+ASKNEWS_ENABLED=false
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `ASKNEWS_ENABLED` with value `false`.
+
+**Accepted values:**
+- To enable (default): `true`, `1`, `yes`, `y`, `on`, `t` (or leave unset)
+- To disable: `false`, `0`, `no`, `n`, `off`, `f`
+
+### Behavior when disabled
+- **All AskNews network requests are skipped** (no token acquisition, no API calls)
+- `fetch_facts_for_batch()` returns empty fact lists (`[]`) for all questions
+- The bot continues to run normally in all modes (test, tournament, live-test)
+- Alternative research providers (EXA, Perplexity) are still used if configured
+- No errors or exceptions are raised
+
+**Note:** Even if `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET` are set, when `ASKNEWS_ENABLED=false`, AskNews is completely bypassed.
+
 ## Changing the Github automation
 You can change which file is run in the GitHub automation by either changing the content of `main.py` to the contents of `main_with_no_framwork.py` (or another script) or by chaging all references to `main.py` to another script in `.github/workflows/run_bot_on_tournament.yaml` and related files.
 
