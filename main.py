@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import argparse
 import traceback
 from datetime import datetime, timedelta
@@ -1037,7 +1038,6 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
                 print(f"[DEBUG] Found reasoning field with {len(reasoning_text)} chars, scanning for JSON", flush=True)
                 
                 # Use regex to find JSON object pattern
-                import re
                 # Look for outermost { ... } that could be valid JSON
                 json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}'
                 matches = list(re.finditer(json_pattern, reasoning_text, re.DOTALL))

@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from datetime import datetime
 from typing import List, Dict, Any
@@ -43,8 +44,6 @@ def _choose_world_date(question_obj: Dict) -> str:
     Returns:
         Date string in format YYYY-MM-DD
     """
-    import os
-    
     # Check for explicit WORLD_DATE override
     env_date = os.environ.get("WORLD_DATE", "").strip()
     if env_date:
