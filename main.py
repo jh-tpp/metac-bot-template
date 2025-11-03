@@ -973,7 +973,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
             CACHE_DIR.mkdir(exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
             
-            # Save request (strip Authorization header)
+            # Save request (Authorization header not included in saved artifacts)
             request_artifact = {
                 "url": url,
                 "model": OPENROUTER_MODEL,

@@ -2,6 +2,7 @@
 import sys
 import os
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
@@ -83,69 +84,69 @@ print("Test 3: llm_call with debug enabled")
 print("="*70)
 
 # Create a temporary cache directory for this test
-test_cache_dir = Path("/tmp/test_cache_openrouter_debug")
-test_cache_dir.mkdir(exist_ok=True)
+with tempfile.TemporaryDirectory() as tmpdir:
+    test_cache_dir = Path(tmpdir)
 
-# Mock environment with debug enabled
-with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key', 'OPENROUTER_DEBUG': 'true'}, clear=False):
-    # Reimport to pick up new env vars
-    import importlib
-    import main
-    importlib.reload(main)
-    
-    # Patch CACHE_DIR to use test directory
-    with patch('main.CACHE_DIR', test_cache_dir):
-        # Mock requests.post
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.reason = "OK"
-        mock_response.headers = {
-            'content-type': 'application/json',
-            'x-request-id': 'test-request-123',
-            'x-ratelimit-limit': '100',
-            'x-ratelimit-remaining': '99'
-        }
-        mock_response.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": '{"debug_test": "enabled"}'
-                    }
-                }
-            ]
-        }
+    # Mock environment with debug enabled
+    with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key', 'OPENROUTER_DEBUG': 'true'}, clear=False):
+        # Reimport to pick up new env vars
+        import importlib
+        import main
+        importlib.reload(main)
         
-        with patch('main.requests.post', return_value=mock_response):
-            result = main.llm_call("test debug prompt", max_tokens=100, temperature=0.5)
+        # Patch CACHE_DIR to use test directory
+        with patch('main.CACHE_DIR', test_cache_dir):
+            # Mock requests.post
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.reason = "OK"
+            mock_response.headers = {
+                'content-type': 'application/json',
+                'x-request-id': 'test-request-123',
+                'x-ratelimit-limit': '100',
+                'x-ratelimit-remaining': '99'
+            }
+            mock_response.json.return_value = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"debug_test": "enabled"}'
+                        }
+                    }
+                ]
+            }
             
-            # Verify result
-            assert result == {"debug_test": "enabled"}, "Failed: Result should match expected JSON"
-            
-            # Verify debug files were created
-            debug_request_files = list(test_cache_dir.glob("debug_llm_*_request.json"))
-            debug_response_files = list(test_cache_dir.glob("debug_llm_*_response.json"))
-            
-            assert len(debug_request_files) > 0, "Failed: Debug request file should be created"
-            assert len(debug_response_files) > 0, "Failed: Debug response file should be created"
-            
-            # Verify request file contents (should not contain Authorization header)
-            request_file = sorted(debug_request_files)[-1]  # Get latest
-            with open(request_file, 'r') as f:
-                request_data = json.load(f)
-                assert "url" in request_data, "Failed: Request should have url"
-                assert "model" in request_data, "Failed: Request should have model"
-                assert "prompt" in request_data, "Failed: Request should have prompt"
-                assert request_data["prompt"] == "test debug prompt", "Failed: Prompt should match"
-                assert "Authorization" not in str(request_data), "Failed: Authorization should not be in request file"
-            
-            # Verify response file contents
-            response_file = sorted(debug_response_files)[-1]  # Get latest
-            with open(response_file, 'r') as f:
-                response_data = json.load(f)
-                assert "status" in response_data, "Failed: Response should have status"
-                assert response_data["status"] == 200, "Failed: Status should be 200"
-                assert "headers" in response_data, "Failed: Response should have headers"
-                assert "body" in response_data, "Failed: Response should have body"
+            with patch('main.requests.post', return_value=mock_response):
+                result = main.llm_call("test debug prompt", max_tokens=100, temperature=0.5)
+                
+                # Verify result
+                assert result == {"debug_test": "enabled"}, "Failed: Result should match expected JSON"
+                
+                # Verify debug files were created
+                debug_request_files = list(test_cache_dir.glob("debug_llm_*_request.json"))
+                debug_response_files = list(test_cache_dir.glob("debug_llm_*_response.json"))
+                
+                assert len(debug_request_files) > 0, "Failed: Debug request file should be created"
+                assert len(debug_response_files) > 0, "Failed: Debug response file should be created"
+                
+                # Verify request file contents (should not contain Authorization header)
+                request_file = sorted(debug_request_files)[-1]  # Get latest
+                with open(request_file, 'r') as f:
+                    request_data = json.load(f)
+                    assert "url" in request_data, "Failed: Request should have url"
+                    assert "model" in request_data, "Failed: Request should have model"
+                    assert "prompt" in request_data, "Failed: Request should have prompt"
+                    assert request_data["prompt"] == "test debug prompt", "Failed: Prompt should match"
+                    assert "Authorization" not in str(request_data), "Failed: Authorization should not be in request file"
+                
+                # Verify response file contents
+                response_file = sorted(debug_response_files)[-1]  # Get latest
+                with open(response_file, 'r') as f:
+                    response_data = json.load(f)
+                    assert "status" in response_data, "Failed: Response should have status"
+                    assert response_data["status"] == 200, "Failed: Status should be 200"
+                    assert "headers" in response_data, "Failed: Response should have headers"
+                    assert "body" in response_data, "Failed: Response should have body"
 
 print("✓ llm_call with debug enabled tests passed")
 
