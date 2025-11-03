@@ -57,7 +57,7 @@ EXA_API_KEY = os.getenv("EXA_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # You'll also need the OpenAI API Key if you want to use the Exa Smart Searcher
 
 # ========== AskNews Enable/Disable Flag ==========
-def _parse_bool_flag(val, default=True):
+def _parse_bool_flag(val, default=False):
     """
     Parse a boolean flag from string value.
     
@@ -84,8 +84,8 @@ def _parse_bool_flag(val, default=True):
     # Default for unrecognized values
     return default
 
-ASKNEWS_ENABLED = os.getenv("ASKNEWS_ENABLED", "true")
-ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, True)
+ASKNEWS_ENABLED = os.getenv("ASKNEWS_ENABLED", "false")
+ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, default=False)
 
 # The tournament IDs below can be used for testing your bot.
 Q4_2024_AI_BENCHMARKING_ID = 32506

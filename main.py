@@ -29,7 +29,7 @@ ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
 # ========== AskNews Enable/Disable Flag ==========
-def _parse_bool_flag(val, default=True):
+def _parse_bool_flag(val, default=False):
     """
     Parse a boolean flag from string value.
     
@@ -56,8 +56,8 @@ def _parse_bool_flag(val, default=True):
     # Default for unrecognized values
     return default
 
-ASKNEWS_ENABLED = os.environ.get("ASKNEWS_ENABLED", "true")
-ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, True)
+ASKNEWS_ENABLED = os.environ.get("ASKNEWS_ENABLED", "false")
+ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, default=False)
 
 # Project-based tournament targeting (AIB Fall 2025)
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
