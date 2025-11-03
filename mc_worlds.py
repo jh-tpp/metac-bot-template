@@ -5,72 +5,41 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 # Keep WORLD_PROMPT intact (per requirements)
-WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. Generate a plausible future world scenario for the date specified. Your output must be valid JSON with the following structure:
+WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. 
+Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
+Schema (all keys required):
 {
-  "date": "YYYY-MM-DD",
-  "summary": "A 2-3 sentence high-level summary of the world state.",
-  "geopolitical": {
-    "major_conflicts": ["..."],
-    "key_alliances": ["..."],
-    "stability_score": 0-10
-  },
-  "economic": {
-    "global_growth_rate": float,
-    "inflation_trends": "...",
-    "major_disruptions": ["..."]
-  },
-  "technology": {
-    "ai_progress": "...",
-    "breakthrough_areas": ["..."],
-    "regulatory_environment": "..."
-  }
+  "world_summary": "string, 180–300 words describing the world dynamics that jointly drive the outcomes below, plain English, concise.",
+  "per_question": [
+    {
+      "key": "Q01",
+      "type": "binary|multiple_choice|numeric",
+      "outcome": {
+        "binary": { "yes": true },
+        "multiple_choice": { "option_index": 0 },
+        "numeric": { "value": 12.3 }
+      }
+    }
+  ]
 }
 
-Be concise and realistic. Do not include any text outside the JSON object.
-"""
+Superforecaster discipline:
+- Tetlockian technique: start with the outside view and base rates; consider alt. hypotheses and common biases; set explicit assumptions internally (do not output them).
+- Coherence: outcomes must be mutually consistent, causally linked to drivers in the summary.
+- Causal model: before filling JSON, internally build a causal model that ties drivers → outcomes over the same world.
 
-def _choose_world_date(question_obj: Dict) -> str:
-    """
-    Infer or choose a date for world generation.
-    
-    Tries to extract a year from the question title or description,
-    then returns a date string in the format YYYY-MM-DD.
-    Falls back to current_year + 5 if no year is found.
-    
-    Args:
-        question_obj: Metaculus question dict with title and description
-    
-    Returns:
-        Date string in format YYYY-MM-DD
-    """
-    # Check for explicit WORLD_DATE override
-    env_date = os.environ.get("WORLD_DATE", "").strip()
-    if env_date:
-        # Validate format
-        try:
-            datetime.strptime(env_date, "%Y-%m-%d")
-            return env_date
-        except ValueError:
-            print(f"[WARN] Invalid WORLD_DATE format: {env_date}, ignoring", flush=True)
-    
-    # Try to extract year from title or description
-    current_year = datetime.now().year
-    text = f"{question_obj.get('title', '')} {question_obj.get('description', '')}"
-    
-    # Look for 4-digit years in range [current_year, 2100]
-    year_pattern = r'\b(20\d{2}|21\d{2})\b'
-    matches = re.findall(year_pattern, text)
-    
-    for match in matches:
-        year = int(match)
-        if current_year <= year <= 2100:
-            # Use July 1st of that year
-            return f"{year}-07-01"
-    
-    # Fallback: current_year + 5, January 1st
-    fallback_year = current_year + 5
-    return f"{fallback_year}-01-01"
+Rules:
+- Include exactly one entry in "per_question" for each question key present in FACTS.
+- Match each entry’s "type" to the fact tag (bin, mc, num).
+- For multiple_choice, "option_index" must be in [0, k-1] (k may appear in the fact tag, e.g., "mc k=6").
+- For numeric, choose a single plausible value for this world.
+- Be conservative under uncertainty; keep all outputs consistent with FACTS.
+- Output PURE JSON only (no prose, no code fences).
+
+FACTS:
+{facts}
+"""
 
 def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False) -> Dict[str, Any]:
     """
@@ -97,17 +66,12 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
     if "numeric" in qtype or "continuous" in qtype:
         bounds = parse_numeric_bounds(question_obj)
     
-    # Choose world date once for all worlds
-    world_date = _choose_world_date(question_obj)
-    print(f"[INFO] Using world date: {world_date} for Q{qid}", flush=True)
-    
     # Sample worlds
     worlds = []
     for i in range(n_worlds):
         try:
-            # Build prompt with explicit date directive and token limit
-            date_directive = f"DATE TO USE: {world_date}\nUse exactly this date for the 'date' field.\nKeep output under 350 tokens.\n\n"
-            prompt = date_directive + WORLD_PROMPT + f"\n\nContext (recent news):\n"
+            # Build prompt with token limit
+            prompt =  WORLD_PROMPT + f"\n\nContext (recent news):\n"
             # Include top-k facts (k<=5) to reduce generic summaries, truncate to avoid token bloat
             for fact in context_facts[:5]:  # cap at 5 to keep prompt short
                 # Truncate long facts to ~200 chars
