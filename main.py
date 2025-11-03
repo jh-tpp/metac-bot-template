@@ -287,7 +287,7 @@ def _normalize_question_object(raw):
     if ptype in ["binary", "bool", "boolean"]:
         qtype = "binary"
     
-    elif ptype in ["discrete"]:
+    elif ptype in ["discrete","multiple_choice"]:
         # discrete → multiple_choice
         qtype = "multiple_choice"
         
