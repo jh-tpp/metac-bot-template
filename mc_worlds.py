@@ -41,9 +41,11 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         dict with 'p' (binary), 'probs' (MC), or 'cdf'/'grid' (numeric),
         plus optionally 'world_summaries' if return_evidence=True
     """
-    from main import llm_call, parse_numeric_bounds  # import here to avoid circular dependency
+    from main import llm_call, parse_numeric_bounds, OPENROUTER_DEBUG_ENABLED, CACHE_DIR  # import here to avoid circular dependency
+    from pathlib import Path
     
     qtype = question_obj.get("type", "").lower()
+    qid = question_obj.get("id", "unknown")
     
     # Parse bounds for numeric questions
     bounds = None
@@ -68,10 +70,34 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
                 min_bound, max_bound = bounds
                 prompt += f"\nIMPORTANT: When providing numeric estimates, all values MUST be within the range [{min_bound}, {max_bound}].\n"
             
+            # Save prompt to debug file if debug is enabled
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    prompt_file = CACHE_DIR / f"debug_world_q{qid}_{i}_prompt.txt"
+                    with open(prompt_file, "w", encoding="utf-8") as f:
+                        f.write(prompt)
+                    print(f"[MC DEBUG] Saved world {i} prompt: {prompt_file}", flush=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
+            
             world = llm_call(prompt, max_tokens=800, temperature=0.7)
             worlds.append(world)
         except Exception as e:
             print(f"[WARN] World {i+1} failed: {e}")
+            
+            # Save error to debug file if debug is enabled
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    error_file = CACHE_DIR / f"debug_world_q{qid}_{i}_error.txt"
+                    with open(error_file, "w", encoding="utf-8") as f:
+                        f.write(f"Error in world {i} generation:\n{str(e)}\n")
+                        import traceback
+                        f.write(f"\nTraceback:\n{traceback.format_exc()}")
+                    print(f"[MC DEBUG] Saved world {i} error: {error_file}", flush=True)
+                except Exception as save_err:
+                    print(f"[ERROR] Failed to save world {i} error: {save_err}", flush=True)
     
     if not worlds:
         raise RuntimeError("No valid worlds generated")

@@ -3,6 +3,9 @@ benchmarks/
 sandbox.py
 test_infer.py
 test_fetch.py
+cache/
+manual_test_debug.py
+manual_test_mc_debug.py
 
 
 ### General gitignore ###

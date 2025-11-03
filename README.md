@@ -57,6 +57,56 @@ Add a repository secret named `ASKNEWS_ENABLED` with value `true` to enable, or 
 
 **Note:** Even if `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET` are set, when `ASKNEWS_ENABLED=false` (or unset), AskNews is completely bypassed.
 
+## OpenRouter Debug Mode (optional)
+The bot supports an `OPENROUTER_DEBUG` environment variable to enable verbose logging and artifact saving for OpenRouter API calls. **Debug mode is disabled by default.** This is useful for:
+- Diagnosing empty LLM responses or JSON parse failures
+- Understanding rate limiting and quota issues
+- Correlating world generation errors with specific prompts
+- Inspecting request/response details for troubleshooting
+
+### Usage
+Set the `OPENROUTER_DEBUG` environment variable to enable or disable debug mode:
+
+**In `.env` file:**
+```bash
+# Enable debug mode
+OPENROUTER_DEBUG=true
+
+# Disable debug mode (default)
+OPENROUTER_DEBUG=false
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `OPENROUTER_DEBUG` with value `true` to enable, or `false` (or leave unset) to disable.
+
+**Accepted values:**
+- To enable: `true`, `1`, `yes`, `y`, `on`, `t`
+- To disable (default): `false`, `0`, `no`, `n`, `off`, `f` (or leave unset)
+
+### Behavior when enabled
+When `OPENROUTER_DEBUG=true`, the bot will:
+- **Log detailed request information** before each OpenRouter call:
+  - URL, model, temperature, max_tokens
+  - Prompt length and first ~1000 characters
+- **Log detailed response information** after each OpenRouter call:
+  - HTTP status code
+  - Selected response headers (x-request-id, x-ratelimit-*, etc.)
+- **Save debug artifacts** to the `cache/` directory:
+  - `cache/debug_llm_*_request.json` - Request details (Authorization header stripped for security)
+  - `cache/debug_llm_*_response.json` - Full response body and headers
+  - `cache/debug_world_q{qid}_{i}_prompt.txt` - World generation prompts (in mc_worlds)
+  - `cache/debug_world_q{qid}_{i}_error.txt` - Error details when world generation fails
+- **Include detailed error messages** for:
+  - Empty content responses (includes truncated response JSON)
+  - JSON parse failures (includes raw content snippet)
+  - Unexpected response shapes (includes response structure)
+
+### Security note
+All saved artifacts automatically strip the `Authorization` header to prevent secrets from being written to disk. Debug logs printed to console do not include API keys.
+
+### Behavior when disabled
+When `OPENROUTER_DEBUG=false` (default), the bot operates normally without verbose logging or artifact saving. Only errors are logged as usual.
+
 ## Changing the Github automation
 You can change which file is run in the GitHub automation by either changing the content of `main.py` to the contents of `main_with_no_framwork.py` (or another script) or by chaging all references to `main.py` to another script in `.github/workflows/run_bot_on_tournament.yaml` and related files.
 

@@ -59,6 +59,10 @@ def _parse_bool_flag(val, default=False):
 ASKNEWS_ENABLED = os.environ.get("ASKNEWS_ENABLED", "false")
 ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, default=False)
 
+# ========== OpenRouter Debug Flag ==========
+OPENROUTER_DEBUG = os.environ.get("OPENROUTER_DEBUG", "false")
+OPENROUTER_DEBUG_ENABLED = _parse_bool_flag(OPENROUTER_DEBUG, default=False)
+
 # Project-based tournament targeting (AIB Fall 2025)
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
@@ -884,6 +888,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
     """
     Call OpenRouter with JSON mode, strip fences, return parsed dict.
     Raises RuntimeError with diagnostics on HTTP failures.
+    When OPENROUTER_DEBUG is enabled, logs request/response details and saves artifacts.
     """
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY not set")
@@ -904,10 +909,34 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
         "response_format": {"type": "json_object"}
     }
 
+    # Debug logging: request details
+    if OPENROUTER_DEBUG_ENABLED:
+        print(f"\n{'='*70}", flush=True)
+        print(f"[OPENROUTER DEBUG] Request details", flush=True)
+        print(f"{'='*70}", flush=True)
+        print(f"URL: {url}", flush=True)
+        print(f"Model: {OPENROUTER_MODEL}", flush=True)
+        print(f"Temperature: {temperature}", flush=True)
+        print(f"Max tokens: {max_tokens}", flush=True)
+        print(f"Prompt length: {len(prompt)} chars", flush=True)
+        print(f"Prompt snippet (first 1000 chars):", flush=True)
+        print(prompt[:1000], flush=True)
+        if len(prompt) > 1000:
+            print(f"... (truncated, {len(prompt) - 1000} more chars)", flush=True)
+        print(f"{'='*70}\n", flush=True)
+
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        resp = requests.post(url, json=payload, headers=headers, timeout=90)
         resp.raise_for_status()
     except requests.exceptions.HTTPError as e:
+        # Debug logging: HTTP error details
+        if OPENROUTER_DEBUG_ENABLED:
+            print(f"\n[OPENROUTER DEBUG] HTTP Error {getattr(e.response, 'status_code', 'N/A')}", flush=True)
+            print(f"Response headers:", flush=True)
+            if hasattr(e.response, 'headers'):
+                for key, value in e.response.headers.items():
+                    print(f"  {key}: {value}", flush=True)
+        
         # parse body if possible to include helpful diagnostic text
         try:
             body = e.response.json()
@@ -921,12 +950,76 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
     except Exception as e:
         raise RuntimeError(f"OpenRouter request failed: {e}")
 
+    # Debug logging: response details
+    if OPENROUTER_DEBUG_ENABLED:
+        print(f"\n{'='*70}", flush=True)
+        print(f"[OPENROUTER DEBUG] Response details", flush=True)
+        print(f"{'='*70}", flush=True)
+        print(f"Status: {resp.status_code} {resp.reason}", flush=True)
+        print(f"Response headers:", flush=True)
+        # Log selected headers
+        headers_of_interest = ['x-request-id', 'x-ratelimit-limit', 'x-ratelimit-remaining', 
+                               'x-ratelimit-reset', 'content-type', 'content-length']
+        for header in headers_of_interest:
+            if header in resp.headers:
+                print(f"  {header}: {resp.headers[header]}", flush=True)
+        print(f"{'='*70}\n", flush=True)
+
     resp_json = resp.json()
-    # defensive navigation
+    
+    # Save debug artifacts
+    if OPENROUTER_DEBUG_ENABLED:
+        try:
+            CACHE_DIR.mkdir(exist_ok=True)
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+            
+            # Save request (Authorization header not included in saved artifacts)
+            request_artifact = {
+                "url": url,
+                "model": OPENROUTER_MODEL,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "prompt_length": len(prompt),
+                "prompt": prompt,
+                "timestamp": timestamp
+            }
+            request_file = CACHE_DIR / f"debug_llm_{timestamp}_request.json"
+            with open(request_file, "w", encoding="utf-8") as f:
+                json.dump(request_artifact, f, indent=2, ensure_ascii=False)
+            print(f"[OPENROUTER DEBUG] Saved request artifact: {request_file}", flush=True)
+            
+            # Save response
+            response_artifact = {
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp_json,
+                "timestamp": timestamp
+            }
+            response_file = CACHE_DIR / f"debug_llm_{timestamp}_response.json"
+            with open(response_file, "w", encoding="utf-8") as f:
+                json.dump(response_artifact, f, indent=2, ensure_ascii=False)
+            print(f"[OPENROUTER DEBUG] Saved response artifact: {response_file}", flush=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to save debug artifacts: {e}", flush=True)
+
+    # defensive navigation with better error messages
     try:
         raw = resp_json["choices"][0]["message"]["content"]
-    except Exception:
-        raise RuntimeError(f"Unexpected OpenRouter response shape: {resp_json}")
+    except (KeyError, IndexError, TypeError) as e:
+        # Include response shape in error for diagnostics
+        resp_snippet = json.dumps(resp_json, indent=2, ensure_ascii=False)[:5000]
+        raise RuntimeError(
+            f"Unexpected OpenRouter response shape: {e}\n"
+            f"Response JSON (truncated to 5000 chars):\n{resp_snippet}"
+        )
+
+    # Check for empty content
+    if not raw or (isinstance(raw, str) and raw.strip() == ""):
+        resp_snippet = json.dumps(resp_json, indent=2, ensure_ascii=False)[:5000]
+        raise RuntimeError(
+            f"Empty content returned from OpenRouter.\n"
+            f"Response JSON (truncated to 5000 chars):\n{resp_snippet}"
+        )
 
     # Strip markdown fences if present
     if isinstance(raw, str) and raw.startswith("```"):
@@ -939,8 +1032,13 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
 
     try:
         return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse JSON from LLM response: {e}\nRaw response: {raw}")
+    except json.JSONDecodeError as e:
+        # Include raw content snippet in error
+        raw_snippet = raw[:2000] if isinstance(raw, str) else str(raw)[:2000]
+        raise RuntimeError(
+            f"Failed to parse JSON from LLM response: {e}\n"
+            f"Raw response (truncated to 2000 chars): {raw_snippet}"
+        )
 
 # ========== Rationale Synthesizer ==========
 def synthesize_rationale(question_text, world_summaries, aggregate_forecast, max_worlds=12):
