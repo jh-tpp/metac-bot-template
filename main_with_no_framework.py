@@ -56,6 +56,37 @@ ASKNEWS_SECRET = os.getenv("ASKNEWS_SECRET")
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # You'll also need the OpenAI API Key if you want to use the Exa Smart Searcher
 
+# ========== AskNews Enable/Disable Flag ==========
+def _parse_bool_flag(val, default=True):
+    """
+    Parse a boolean flag from string value.
+    
+    Args:
+        val: String value to parse (e.g., "true", "false", "1", "0", "yes", "no", etc.)
+        default: Default value if val is None or empty
+    
+    Returns:
+        Boolean value
+    """
+    if val is None or val == "":
+        return default
+    
+    val_lower = str(val).lower().strip()
+    
+    # True values
+    if val_lower in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    
+    # False values
+    if val_lower in ("0", "false", "f", "no", "n", "off"):
+        return False
+    
+    # Default for unrecognized values
+    return default
+
+ASKNEWS_ENABLED = os.getenv("ASKNEWS_ENABLED", "true")
+ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, True)
+
 # The tournament IDs below can be used for testing your bot.
 Q4_2024_AI_BENCHMARKING_ID = 32506
 Q1_2025_AI_BENCHMARKING_ID = 32627
@@ -256,7 +287,8 @@ async def call_llm(prompt: str, model: str = "gpt-4o", temperature: float = 0.3)
 
 def run_research(question: str) -> str:
     research = ""
-    if ASKNEWS_CLIENT_ID and ASKNEWS_SECRET:
+    # Respect ASKNEWS_ENABLED flag - if disabled, skip AskNews even if credentials exist
+    if ASKNEWS_USE and ASKNEWS_CLIENT_ID and ASKNEWS_SECRET:
         research = call_asknews(question)
     elif EXA_API_KEY:
         research = call_exa_smart_searcher(question)

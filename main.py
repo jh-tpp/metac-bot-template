@@ -28,6 +28,37 @@ METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
+# ========== AskNews Enable/Disable Flag ==========
+def _parse_bool_flag(val, default=True):
+    """
+    Parse a boolean flag from string value.
+    
+    Args:
+        val: String value to parse (e.g., "true", "false", "1", "0", "yes", "no", etc.)
+        default: Default value if val is None or empty
+    
+    Returns:
+        Boolean value
+    """
+    if val is None or val == "":
+        return default
+    
+    val_lower = str(val).lower().strip()
+    
+    # True values
+    if val_lower in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    
+    # False values
+    if val_lower in ("0", "false", "f", "no", "n", "off"):
+        return False
+    
+    # Default for unrecognized values
+    return default
+
+ASKNEWS_ENABLED = os.environ.get("ASKNEWS_ENABLED", "true")
+ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, True)
+
 # Project-based tournament targeting (AIB Fall 2025)
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
@@ -711,6 +742,11 @@ def fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q):
     Returns:
         dict of question_id -> list of "YYYY-MM-DD: headline (url)" strings
     """
+    # If AskNews is disabled, return empty lists immediately
+    if not ASKNEWS_USE:
+        print("[INFO] AskNews is disabled (ASKNEWS_ENABLED=false); returning empty fact lists")
+        return {qid: [] for qid in qid_to_text}
+    
     cache = _load_news_cache()
     results = {}
     to_fetch = {}
@@ -756,6 +792,9 @@ def _get_asknews_token():
     Acquire an OAuth token from AskNews using client credentials with HTTP Basic auth.
     Returns access_token string or None on failure.
     """
+    if not ASKNEWS_USE:
+        return None
+    
     if not ASKNEWS_CLIENT_ID or not ASKNEWS_SECRET:
         print("[WARN] ASKNEWS_CLIENT_ID/ASKNEWS_SECRET not set")
         return None
@@ -796,6 +835,9 @@ def _get_asknews_token():
 
 def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q, token=None):
     """Fetch facts from AskNews for a single question; return list of formatted strings."""
+    if not ASKNEWS_USE:
+        return []
+    
     if token is None:
         token = _get_asknews_token()
     if not token:
