@@ -16,7 +16,7 @@ from adapters import mc_results_to_metaculus_payload, submit_forecast
 
 # ========== Constants ==========
 N_WORLDS_DEFAULT = 10  # for tests
-N_WORLDS_TOURNAMENT = 10  # flip to this for production
+N_WORLDS_TOURNAMENT = 30  # flip to this for production
 ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
 CACHE_DIR = Path("cache")
