@@ -1,4 +1,7 @@
 import json
+import os
+import re
+from datetime import datetime
 from typing import List, Dict, Any
 
 # Keep WORLD_PROMPT intact (per requirements)
@@ -27,6 +30,48 @@ WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. Generate a p
 Be concise and realistic. Do not include any text outside the JSON object.
 """
 
+def _choose_world_date(question_obj: Dict) -> str:
+    """
+    Infer or choose a date for world generation.
+    
+    Tries to extract a year from the question title or description,
+    then returns a date string in the format YYYY-MM-DD.
+    Falls back to current_year + 5 if no year is found.
+    
+    Args:
+        question_obj: Metaculus question dict with title and description
+    
+    Returns:
+        Date string in format YYYY-MM-DD
+    """
+    # Check for explicit WORLD_DATE override
+    env_date = os.environ.get("WORLD_DATE", "").strip()
+    if env_date:
+        # Validate format
+        try:
+            datetime.strptime(env_date, "%Y-%m-%d")
+            return env_date
+        except ValueError:
+            print(f"[WARN] Invalid WORLD_DATE format: {env_date}, ignoring", flush=True)
+    
+    # Try to extract year from title or description
+    current_year = datetime.now().year
+    text = f"{question_obj.get('title', '')} {question_obj.get('description', '')}"
+    
+    # Look for 4-digit years in range [current_year, 2100]
+    year_pattern = r'\b(20\d{2}|21\d{2})\b'
+    matches = re.findall(year_pattern, text)
+    
+    for match in matches:
+        year = int(match)
+        if current_year <= year <= 2100:
+            # Use July 1st of that year
+            return f"{year}-07-01"
+    
+    # Fallback: current_year + 5, January 1st
+    fallback_year = current_year + 5
+    return f"{fallback_year}-01-01"
+
 def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False) -> Dict[str, Any]:
     """
     Run Monte-Carlo sampling of joint worlds, aggregate forecasts.
@@ -52,12 +97,17 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
     if "numeric" in qtype or "continuous" in qtype:
         bounds = parse_numeric_bounds(question_obj)
     
+    # Choose world date once for all worlds
+    world_date = _choose_world_date(question_obj)
+    print(f"[INFO] Using world date: {world_date} for Q{qid}", flush=True)
+    
     # Sample worlds
     worlds = []
     for i in range(n_worlds):
         try:
-            # Build prompt with context
-            prompt = WORLD_PROMPT + f"\n\nContext (recent news):\n"
+            # Build prompt with explicit date directive and token limit
+            date_directive = f"DATE TO USE: {world_date}\nUse exactly this date for the 'date' field.\nKeep output under 350 tokens.\n\n"
+            prompt = date_directive + WORLD_PROMPT + f"\n\nContext (recent news):\n"
             # Include top-k facts (k<=5) to reduce generic summaries, truncate to avoid token bloat
             for fact in context_facts[:5]:  # cap at 5 to keep prompt short
                 # Truncate long facts to ~200 chars

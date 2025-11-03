@@ -107,6 +107,63 @@ All saved artifacts automatically strip the `Authorization` header to prevent se
 ### Behavior when disabled
 When `OPENROUTER_DEBUG=false` (default), the bot operates normally without verbose logging or artifact saving. Only errors are logged as usual.
 
+## OpenRouter Model Override (optional)
+The bot allows you to override the default OpenRouter model via the `OPENROUTER_MODEL` environment variable. **The default model is `openai/gpt-4o-mini`** which provides better JSON mode reliability than earlier models.
+
+### Usage
+Set the `OPENROUTER_MODEL` environment variable to specify which model to use:
+
+**In `.env` file:**
+```bash
+# Use default model (gpt-4o-mini)
+OPENROUTER_MODEL=openai/gpt-4o-mini
+
+# Use a different model
+OPENROUTER_MODEL=anthropic/claude-3-opus
+OPENROUTER_MODEL=openai/gpt-5-nano
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `OPENROUTER_MODEL` with your preferred model name (e.g., `openai/gpt-5-nano`).
+
+### Special handling for gpt-5-* models
+When using gpt-5-* models (e.g., `openai/gpt-5-nano`), the bot automatically includes `reasoning: {effort: none}` in API requests to suppress the reasoning channel. This prevents empty content responses in JSON mode. You can also force this behavior for other models using `OPENROUTER_DISABLE_REASONING=true`.
+
+## OpenRouter Reasoning Disable (optional)
+For models that support a reasoning channel (e.g., gpt-5-*), you can explicitly disable it using `OPENROUTER_DISABLE_REASONING`. **This is automatically enabled for gpt-5-\* models** to prevent empty content in JSON mode.
+
+### Usage
+**In `.env` file:**
+```bash
+# Force disable reasoning for all models
+OPENROUTER_DISABLE_REASONING=true
+
+# Use automatic detection (default)
+OPENROUTER_DISABLE_REASONING=false
+```
+
+**Accepted values:**
+- To enable: `true`, `1`, `yes`, `y`, `on`, `t`
+- To disable (default): `false`, `0`, `no`, `n`, `off`, `f` (or leave unset)
+
+## World Date Override (optional)
+The bot can use an explicit date for world generation scenarios via the `WORLD_DATE` environment variable. By default, the bot infers the date from the question text (looking for years) or uses `current_year + 5`.
+
+### Usage
+**In `.env` file:**
+```bash
+# Force a specific date for all world scenarios
+WORLD_DATE=2030-07-01
+```
+
+**Format:** `YYYY-MM-DD`
+
+**Behavior:**
+- If `WORLD_DATE` is set, all world scenarios use this exact date
+- If not set, the bot searches for years (YYYY) in the question title/description
+- If a year is found in range [current_year, 2100], uses `YYYY-07-01`
+- Otherwise, defaults to `(current_year + 5)-01-01`
+
 ## Changing the Github automation
 You can change which file is run in the GitHub automation by either changing the content of `main.py` to the contents of `main_with_no_framwork.py` (or another script) or by chaging all references to `main.py` to another script in `.github/workflows/run_bot_on_tournament.yaml` and related files.
 
