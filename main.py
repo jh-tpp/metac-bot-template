@@ -23,7 +23,7 @@ NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
 METACULUS_API_BASE = "https://www.metaculus.com/api2/questions/"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "openai/gpt-5-nano"
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
@@ -62,6 +62,10 @@ ASKNEWS_USE = _parse_bool_flag(ASKNEWS_ENABLED, default=False)
 # ========== OpenRouter Debug Flag ==========
 OPENROUTER_DEBUG = os.environ.get("OPENROUTER_DEBUG", "false")
 OPENROUTER_DEBUG_ENABLED = _parse_bool_flag(OPENROUTER_DEBUG, default=False)
+
+# ========== OpenRouter Reasoning Disable Flag ==========
+OPENROUTER_DISABLE_REASONING = os.environ.get("OPENROUTER_DISABLE_REASONING", "false")
+OPENROUTER_DISABLE_REASONING_ENABLED = _parse_bool_flag(OPENROUTER_DISABLE_REASONING, default=False)
 
 # Project-based tournament targeting (AIB Fall 2025)
 METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
@@ -908,6 +912,12 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
         "max_tokens": max_tokens,
         "response_format": {"type": "json_object"}
     }
+    
+    # Add reasoning suppression for gpt-5-* models or if explicitly requested
+    if OPENROUTER_DISABLE_REASONING_ENABLED or "gpt-5" in OPENROUTER_MODEL.lower():
+        payload["reasoning"] = {"effort": "none"}
+        if OPENROUTER_DEBUG_ENABLED:
+            print(f"[OPENROUTER DEBUG] Added reasoning suppression for model: {OPENROUTER_MODEL}", flush=True)
 
     # Debug logging: request details
     if OPENROUTER_DEBUG_ENABLED:
@@ -1013,11 +1023,45 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
             f"Response JSON (truncated to 5000 chars):\n{resp_snippet}"
         )
 
-    # Check for empty content
+    # Check for empty content and attempt fallback
     if not raw or (isinstance(raw, str) and raw.strip() == ""):
+        # Try fallback: extract JSON from reasoning or other fields
+        print(f"[WARN] Empty content returned, attempting fallback JSON extraction", flush=True)
+        
+        # Try to extract from reasoning field
+        try:
+            message = resp_json["choices"][0]["message"]
+            reasoning_text = message.get("reasoning", "")
+            
+            if reasoning_text:
+                print(f"[DEBUG] Found reasoning field with {len(reasoning_text)} chars, scanning for JSON", flush=True)
+                
+                # Use regex to find JSON object pattern
+                import re
+                # Look for outermost { ... } that could be valid JSON
+                json_pattern = r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}'
+                matches = list(re.finditer(json_pattern, reasoning_text, re.DOTALL))
+                
+                # Try matches from longest to shortest
+                matches.sort(key=lambda m: len(m.group(0)), reverse=True)
+                
+                for match in matches:
+                    candidate = match.group(0)
+                    try:
+                        parsed = json.loads(candidate)
+                        print(f"[DEBUG] Successfully extracted JSON from reasoning field ({len(candidate)} chars)", flush=True)
+                        return parsed
+                    except json.JSONDecodeError:
+                        continue
+                
+                print(f"[DEBUG] No valid JSON found in reasoning field", flush=True)
+        except (KeyError, IndexError, TypeError) as e:
+            print(f"[DEBUG] Could not access reasoning field: {e}", flush=True)
+        
+        # If fallback failed, raise detailed error
         resp_snippet = json.dumps(resp_json, indent=2, ensure_ascii=False)[:5000]
         raise RuntimeError(
-            f"Empty content returned from OpenRouter.\n"
+            f"Empty content returned from OpenRouter and fallback JSON extraction failed.\n"
             f"Response JSON (truncated to 5000 chars):\n{resp_snippet}"
         )
 
