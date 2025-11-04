@@ -61,7 +61,7 @@ def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict
     
     raise ValueError(f"Unknown question type: {qtype}")
 
-def submit_forecast(question_id: int, payload: Dict, token: str):
+def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
     """
     POST forecast to Metaculus.
     
@@ -69,14 +69,50 @@ def submit_forecast(question_id: int, payload: Dict, token: str):
         question_id: Metaculus question ID
         payload: submission payload
         token: Metaculus API token
+        trace: Optional DiagnosticTrace for saving diagnostics
     
     Raises on failure.
     """
+    from main import _diag_save
+    
     url = f"https://www.metaculus.com/api/questions/{question_id}/forecast/"
     headers = {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json"
     }
     
+    # Save submission payload diagnostics
+    if trace:
+        try:
+            submission_diag = {
+                "url": url,
+                "question_id": question_id,
+                "payload": payload,
+                "headers": {k: v for k, v in headers.items() if k.lower() != "authorization"}
+            }
+            _diag_save(trace, "30_submission_payload", submission_diag, redact=True)
+        except Exception as e:
+            print(f"[WARN] Failed to save submission payload diagnostics: {e}", flush=True)
+    
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    
+    # Save submission response diagnostics
+    if trace:
+        try:
+            # Try to get JSON body
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            
+            response_diag = {
+                "status": resp.status_code,
+                "reason": resp.reason,
+                "headers": {k: v for k, v in resp.headers.items() if k.lower() not in ["authorization", "set-cookie"]},
+                "body": body
+            }
+            _diag_save(trace, "31_submission_response", response_diag, redact=True)
+        except Exception as e:
+            print(f"[WARN] Failed to save submission response diagnostics: {e}", flush=True)
+    
     resp.raise_for_status()

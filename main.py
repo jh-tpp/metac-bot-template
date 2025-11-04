@@ -13,6 +13,7 @@ from urllib3.util.retry import Retry
 # Local modules
 from mc_worlds import run_mc_worlds, WORLD_PROMPT
 from adapters import mc_results_to_metaculus_payload, submit_forecast
+from diagnostics import DiagnosticTrace
 
 # ========== Constants ==========
 N_WORLDS_DEFAULT = 10  # for tests
@@ -73,7 +74,20 @@ METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
 METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
 
+# ========== Diagnostics Enable Flag ==========
+DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "true")
+DIAGNOSTICS_USE = _parse_bool_flag(DIAGNOSTICS_ENABLED, default=True)
+DIAGNOSTICS_TRACE_DIR = os.environ.get("DIAGNOSTICS_TRACE_DIR", "cache/trace")
+
 # ========== Diagnostic Helpers ==========
+def _diag_save(trace, stage: str, obj, redact: bool = True):
+    """Helper to save diagnostics if enabled."""
+    if DIAGNOSTICS_USE and trace:
+        try:
+            return trace.save(stage, obj, redact=redact)
+        except Exception as e:
+            print(f"[WARN] Failed to save diagnostic {stage}: {e}", flush=True)
+    return None
 def _write_debug_files(prefix, raw_text, parsed_obj):
     """
     Write debug artifacts: raw response text and parsed JSON.
@@ -642,6 +656,16 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
             if not qid:
                 continue
             
+            # Initialize diagnostic trace for this question
+            trace = None
+            if DIAGNOSTICS_USE:
+                try:
+                    trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
+                    # Save raw question as received from Metaculus
+                    _diag_save(trace, "00_raw_question", q, redact=False)
+                except Exception as e:
+                    print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
+            
             # Use new helper to infer question type and extract fields
             qtype, extra = _infer_qtype_and_fields(q)
             
@@ -692,6 +716,12 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                     except (ValueError, TypeError):
                         # For date strings, keep as-is (will be handled by downstream code)
                         normalized["max"] = numeric_bounds["max"]
+            
+            # Save normalized question with raw for trace (keep raw in normalized for diagnostics)
+            if trace:
+                normalized_with_raw = normalized.copy()
+                normalized_with_raw["raw"] = q
+                _diag_save(trace, "01_normalized", normalized_with_raw, redact=False)
             
             questions.append(normalized)
         
@@ -889,12 +919,24 @@ def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q, token=None
         return ["AskNews unavailable; base rates only."]
 
 # ========== Hardened LLM Call ==========
-def llm_call(prompt, max_tokens=1500, temperature=0.3):
+_llm_call_counter = 0  # Global counter for LLM calls
+
+def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
     """
     Call OpenRouter with JSON mode, strip fences, return parsed dict.
     Raises RuntimeError with diagnostics on HTTP failures.
     When OPENROUTER_DEBUG is enabled, logs request/response details and saves artifacts.
+    
+    Args:
+        prompt: Prompt text
+        max_tokens: Max tokens for response
+        temperature: Temperature for sampling
+        trace: Optional DiagnosticTrace for per-question diagnostics
     """
+    global _llm_call_counter
+    _llm_call_counter += 1
+    call_id = _llm_call_counter
+    
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY not set")
 
@@ -1012,6 +1054,32 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
             print(f"[OPENROUTER DEBUG] Saved response artifact: {response_file}", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to save debug artifacts: {e}", flush=True)
+    
+    # Save per-question diagnostics
+    if trace:
+        try:
+            # Save LLM request
+            request_diag = {
+                "url": url,
+                "model": OPENROUTER_MODEL,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            }
+            if OPENROUTER_DISABLE_REASONING_ENABLED or "gpt-5" in OPENROUTER_MODEL.lower():
+                request_diag["reasoning"] = {"effort": "none"}
+            _diag_save(trace, f"10_llm_request_{call_id}", request_diag, redact=True)
+            
+            # Save LLM response
+            response_diag = {
+                "status": resp.status_code,
+                "headers": dict(resp.headers),
+                "body": resp_json
+            }
+            _diag_save(trace, f"11_llm_response_{call_id}", response_diag, redact=True)
+        except Exception as e:
+            print(f"[WARN] Failed to save per-question LLM diagnostics: {e}", flush=True)
 
     # defensive navigation with better error messages
     try:
@@ -1050,6 +1118,20 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
                     try:
                         parsed = json.loads(candidate)
                         print(f"[DEBUG] Successfully extracted JSON from reasoning field ({len(candidate)} chars)", flush=True)
+                        
+                        # Save fallback parsed output diagnostics
+                        if trace:
+                            try:
+                                fallback_diag = {
+                                    "parsed_successfully": True,
+                                    "output": parsed,
+                                    "parse_warnings": ["Extracted from reasoning field (fallback)"],
+                                    "was_fallback": True
+                                }
+                                _diag_save(trace, f"12_parsed_output_{call_id}", fallback_diag, redact=False)
+                            except Exception as e:
+                                print(f"[WARN] Failed to save fallback parsed output diagnostics: {e}", flush=True)
+                        
                         return parsed
                     except json.JSONDecodeError:
                         continue
@@ -1075,8 +1157,35 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3):
         raw = "\n".join(lines)
 
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        
+        # Save parsed output diagnostics
+        if trace:
+            try:
+                parsed_diag = {
+                    "parsed_successfully": True,
+                    "output": parsed,
+                    "parse_warnings": []
+                }
+                _diag_save(trace, f"12_parsed_output_{call_id}", parsed_diag, redact=False)
+            except Exception as e:
+                print(f"[WARN] Failed to save parsed output diagnostics: {e}", flush=True)
+        
+        return parsed
     except json.JSONDecodeError as e:
+        # Save parse failure diagnostics
+        if trace:
+            try:
+                parse_error_diag = {
+                    "parsed_successfully": False,
+                    "error": str(e),
+                    "raw_snippet": raw[:2000] if isinstance(raw, str) else str(raw)[:2000],
+                    "was_fallback": False
+                }
+                _diag_save(trace, f"12_parsed_output_{call_id}", parse_error_diag, redact=False)
+            except Exception as save_err:
+                print(f"[WARN] Failed to save parse error diagnostics: {save_err}", flush=True)
+        
         # Include raw content snippet in error
         raw_snippet = raw[:2000] if isinstance(raw, str) else str(raw)[:2000]
         raise RuntimeError(
@@ -1135,21 +1244,49 @@ def synthesize_rationale(question_text, world_summaries, aggregate_forecast, max
         return ["Could not synthesize rationale due to LLM error."]
 
 # ========== Numeric Bounds Parser ==========
-def parse_numeric_bounds(question_obj):
+def parse_numeric_bounds(question_obj, trace=None):
     """
     Parse numeric bounds from question metadata or description.
     
     Args:
         question_obj: Metaculus question dict
+        trace: Optional DiagnosticTrace for saving bounds diagnostics
     
     Returns:
         (min_val, max_val) tuple or None if not found
     """
+    qid = question_obj.get("id", "unknown")
+    
     # First try question metadata
+    min_val = None
+    max_val = None
+    min_type = None
+    max_type = None
+    is_date_like = False
+    
     if "min" in question_obj and "max" in question_obj:
         try:
             min_val = float(question_obj["min"])
             max_val = float(question_obj["max"])
+            min_type = "metadata"
+            max_type = "metadata"
+            
+            # Check if this looks like a date (Unix timestamp or year range)
+            if min_val > 1900 and max_val < 2200:
+                is_date_like = True
+            
+            # Save bounds diagnostics
+            if trace:
+                bounds_info = {
+                    "min": min_val,
+                    "max": max_val,
+                    "min_type": min_type,
+                    "max_type": max_type,
+                    "is_date_like": is_date_like,
+                    "source": "question_metadata"
+                }
+                _diag_save(trace, "02_bounds_after_parse", bounds_info, redact=False)
+            
             return (min_val, max_val)
         except (ValueError, TypeError):
             pass
@@ -1167,19 +1304,39 @@ def parse_numeric_bounds(question_obj):
         try:
             min_val = float(match.group(1))
             max_val = float(match.group(2))
+            min_type = "description_regex"
+            max_type = "description_regex"
+            
+            # Check if this looks like a date
+            if min_val > 1900 and max_val < 2200:
+                is_date_like = True
+            
+            # Save bounds diagnostics
+            if trace:
+                bounds_info = {
+                    "min": min_val,
+                    "max": max_val,
+                    "min_type": min_type,
+                    "max_type": max_type,
+                    "is_date_like": is_date_like,
+                    "source": "description_regex"
+                }
+                _diag_save(trace, "02_bounds_after_parse", bounds_info, redact=False)
+            
             return (min_val, max_val)
         except (ValueError, TypeError):
             pass
     
     return None
 
-def correct_numeric_bounds(result, bounds):
+def correct_numeric_bounds(result, bounds, trace=None):
     """
     Attempt to correct numeric result to fit within bounds.
     
     Args:
         result: dict with grid, cdf, p10, p50, p90
         bounds: (min_bound, max_bound) tuple
+        trace: Optional DiagnosticTrace for saving clamp diagnostics
     
     Returns:
         (corrected_result, success) tuple
@@ -1196,19 +1353,39 @@ def correct_numeric_bounds(result, bounds):
     
     # Check if correction is needed
     needs_correction = False
+    clamp_details = {
+        "was_clamped": False,
+        "min": min_bound,
+        "max": max_bound,
+        "clamped_values": []
+    }
+    
     if min(grid) < min_bound or max(grid) > max_bound:
         needs_correction = True
+        clamp_details["clamped_values"].append({
+            "field": "grid",
+            "original_min": min(grid),
+            "original_max": max(grid),
+            "clamped_min": max(min_bound, min(grid)),
+            "clamped_max": min(max_bound, max(grid))
+        })
     
     for pname in ["p10", "p50", "p90"]:
         pval = result.get(pname)
         if pval is not None and (pval < min_bound or pval > max_bound):
             needs_correction = True
+            clamp_details["clamped_values"].append({
+                "field": pname,
+                "original_value": pval,
+                "clamped_value": max(min_bound, min(max_bound, pval))
+            })
     
     if not needs_correction:
         return result, True
     
     # Attempt correction: clamp grid and percentiles
     print(f"[INFO] Attempting bounded correction: clamping to [{min_bound}, {max_bound}]")
+    clamp_details["was_clamped"] = True
     
     corrected = result.copy()
     
@@ -1234,6 +1411,10 @@ def correct_numeric_bounds(result, bounds):
     for pname in ["p10", "p50", "p90"]:
         if pname in corrected:
             corrected[pname] = max(min_bound, min(max_bound, corrected[pname]))
+    
+    # Save clamp diagnostics
+    if trace:
+        _diag_save(trace, "02b_bounds_clamp", clamp_details, redact=False)
     
     return corrected, True
 
