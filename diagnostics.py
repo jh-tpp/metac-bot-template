@@ -35,6 +35,8 @@ class DiagnosticTrace:
 
     def save(self, stage: str, obj: Any, redact: bool = True) -> str:
         path = os.path.join(self.dir, f"{stage}.json")
+        # Ensure parent directory exists (for subdirectories like diffs/)
+        _ensure_dir(os.path.dirname(path))
         to_write = _redact(obj) if redact else obj
         with open(path, "w", encoding="utf-8") as f:
             json.dump(to_write, f, indent=2, ensure_ascii=False)
