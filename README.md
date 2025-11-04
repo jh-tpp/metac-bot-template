@@ -146,6 +146,56 @@ OPENROUTER_DISABLE_REASONING=false
 - To enable: `true`, `1`, `yes`, `y`, `on`, `t`
 - To disable (default): `false`, `0`, `no`, `n`, `off`, `f` (or leave unset)
 
+## Diagnostics (optional)
+The bot supports comprehensive per-question diagnostic tracing via the `DIAGNOSTICS_ENABLED` environment variable. **Diagnostics are enabled by default.** This feature saves detailed JSON artifacts for each question throughout the forecasting pipeline, making it trivial to see exactly what was sent to the LLM, what was received, and how each downstream step transformed the data.
+
+### Usage
+Set the `DIAGNOSTICS_ENABLED` environment variable to enable or disable diagnostic tracing:
+
+**In `.env` file:**
+```bash
+# Enable diagnostics (default)
+DIAGNOSTICS_ENABLED=true
+
+# Disable diagnostics
+DIAGNOSTICS_ENABLED=false
+
+# Optionally specify custom trace directory (default: cache/trace)
+DIAGNOSTICS_TRACE_DIR=my_custom_trace_dir
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `DIAGNOSTICS_ENABLED` with value `true` to enable (default), or `false` to disable.
+
+**Accepted values:**
+- To enable (default): `true`, `1`, `yes`, `y`, `on`, `t` (or leave unset)
+- To disable: `false`, `0`, `no`, `n`, `off`, `f`
+
+### Behavior when enabled
+When `DIAGNOSTICS_ENABLED=true` (default), the bot will:
+- **Create per-question trace directories** at `cache/trace/q{qid}/{run_id}/` (run_id is a UTC timestamp)
+- **Save diagnostic artifacts** at each pipeline stage:
+  - `00_raw_question.json` - Raw question object from Metaculus API
+  - `01_normalized.json` - Normalized question with type inference and bounds extraction
+  - `02_bounds_after_parse.json` - Parsed numeric bounds with type information (for numeric questions)
+  - `02b_bounds_clamp.json` - Bounds clamping details if values were out of range
+  - `10_llm_request_{n}.json` - LLM request details for each call (Authorization header redacted)
+  - `11_llm_response_{n}.json` - Raw LLM response for each call
+  - `12_parsed_output_{n}.json` - Parsed model output with parse warnings if any
+  - `20_aggregate_input.json` - All worlds/forecasts before aggregation with their weights
+  - `21_aggregate_output.json` - Aggregated forecast result
+  - `diffs/diff_aggregate_output.json` - Diff of aggregate output vs previous run (if exists)
+  - `30_submission_payload.json` - Forecast submission payload (Authorization header redacted)
+  - `31_submission_response.json` - Submission response from Metaculus API
+- **Upload trace artifacts** to GitHub Actions (available as downloadable `trace` artifact)
+- **Automatically redact** Authorization headers and API keys in all saved artifacts
+
+### Security note
+All diagnostic artifacts automatically strip sensitive headers (`Authorization`, `api_key`, etc.) to prevent secrets from being written to disk or uploaded to GitHub Actions.
+
+### Behavior when disabled
+When `DIAGNOSTICS_ENABLED=false`, diagnostic tracing is completely bypassed. The bot operates normally without saving per-question trace artifacts. The existing `OPENROUTER_DEBUG` behavior is independent and continues to work as before.
+
 ## World Date Override (optional)
 The bot can use an explicit date for world generation scenarios via the `WORLD_DATE` environment variable. By default, the bot infers the date from the question text (looking for years) or uses `current_year + 5`.
 

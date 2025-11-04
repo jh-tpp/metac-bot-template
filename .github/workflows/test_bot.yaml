@@ -77,4 +77,11 @@ jobs:
         with:
           name: mc-reasons
           path: mc_reasons.txt
+      - name: Upload diagnostic traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace
+          path: cache/trace/**
+          if-no-files-found: ignore
 

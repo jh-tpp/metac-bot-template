@@ -41,7 +41,7 @@ FACTS:
 {facts}
 """
 
-def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False) -> Dict[str, Any]:
+def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False, trace=None) -> Dict[str, Any]:
     """
     Run Monte-Carlo sampling of joint worlds, aggregate forecasts.
     
@@ -50,12 +50,13 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         context_facts: list of news facts
         n_worlds: number of MC samples
         return_evidence: if True, return world_summaries for rationale synthesis
+        trace: Optional DiagnosticTrace for saving diagnostics
     
     Returns:
         dict with 'p' (binary), 'probs' (MC), or 'cdf'/'grid' (numeric),
         plus optionally 'world_summaries' if return_evidence=True
     """
-    from main import llm_call, parse_numeric_bounds, OPENROUTER_DEBUG_ENABLED, CACHE_DIR  # import here to avoid circular dependency
+    from main import llm_call, parse_numeric_bounds, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save  # import here to avoid circular dependency
     from pathlib import Path
     
     qtype = question_obj.get("type", "").lower()
@@ -64,7 +65,7 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
     # Parse bounds for numeric questions
     bounds = None
     if "numeric" in qtype or "continuous" in qtype:
-        bounds = parse_numeric_bounds(question_obj)
+        bounds = parse_numeric_bounds(question_obj, trace=trace)
     
     # Sample worlds
     worlds = []
@@ -95,7 +96,7 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
                 except Exception as e:
                     print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
             
-            world = llm_call(prompt, max_tokens=800, temperature=0.7)
+            world = llm_call(prompt, max_tokens=800, temperature=0.7, trace=trace)
             worlds.append(world)
         except Exception as e:
             print(f"[WARN] World {i+1} failed: {e}")
@@ -118,6 +119,18 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
     
     # Collect summaries
     world_summaries = [w.get("summary", "") for w in worlds if "summary" in w]
+    
+    # Save aggregate input diagnostics (before aggregation)
+    if trace:
+        try:
+            aggregate_input = {
+                "n_worlds": len(worlds),
+                "worlds": worlds,
+                "world_summaries": world_summaries
+            }
+            _diag_save(trace, "20_aggregate_input", aggregate_input, redact=False)
+        except Exception as e:
+            print(f"[WARN] Failed to save aggregate input diagnostics: {e}", flush=True)
     
     # Aggregate forecasts per question type
     result = {}
@@ -208,6 +221,25 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
             for pname, pval in [("p10", result["p10"]), ("p50", result["p50"]), ("p90", result["p90"])]:
                 if pval < min_bound or pval > max_bound:
                     print(f"[REJECT] {pname}={pval} outside bounds [{min_bound}, {max_bound}]")
+    
+    # Save aggregate output diagnostics (after aggregation)
+    if trace:
+        try:
+            _diag_save(trace, "21_aggregate_output", result, redact=False)
+            
+            # Check for previous aggregate output and create diff
+            import os
+            prev_file = os.path.join(trace.dir, "21_aggregate_output.json")
+            if os.path.exists(prev_file):
+                try:
+                    import json
+                    with open(prev_file, "r", encoding="utf-8") as f:
+                        prev_result = json.load(f)
+                    trace.diff("aggregate_output", prev_result, result)
+                except Exception as diff_err:
+                    print(f"[WARN] Failed to create aggregate diff: {diff_err}", flush=True)
+        except Exception as e:
+            print(f"[WARN] Failed to save aggregate output diagnostics: {e}", flush=True)
     
     if return_evidence:
         result["world_summaries"] = world_summaries
