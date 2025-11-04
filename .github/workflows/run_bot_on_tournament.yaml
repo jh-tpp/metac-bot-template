@@ -213,3 +213,11 @@ jobs:
         with:
           name: new-ids
           path: new_ids.json
+      
+      - name: Upload diagnostic traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace
+          path: cache/trace/**
+          if-no-files-found: ignore

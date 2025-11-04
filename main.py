@@ -1494,7 +1494,7 @@ def validate_mc_result(question_obj, result):
     return True, ""
 
 # ========== Forecast Submission (with guardrails) ==========
-def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
+def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, trace=None):
     """
     Post forecast if all checks pass.
     
@@ -1503,6 +1503,7 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         mc_result: dict with 'p' or 'probs' or 'cdf'/'grid', plus 'reasoning'
         publish: bool, actually POST or just dry-run
         skip_set: set of qids already forecasted (optional)
+        trace: Optional DiagnosticTrace for saving diagnostics
     
     Returns:
         bool success
@@ -1528,10 +1529,10 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         # For numeric questions with bounds, try correction
         qtype = question_obj.get("type", "").lower()
         if "numeric" in qtype or "continuous" in qtype:
-            bounds = parse_numeric_bounds(question_obj)
+            bounds = parse_numeric_bounds(question_obj, trace=trace)
             if bounds:
                 print(f"[WARN] Initial validation failed for Q{qid}: {err}")
-                mc_result, success = correct_numeric_bounds(mc_result, bounds)
+                mc_result, success = correct_numeric_bounds(mc_result, bounds, trace=trace)
                 if success:
                     # Re-validate after correction
                     valid, err = validate_mc_result(question_obj, mc_result)
@@ -1557,7 +1558,7 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None):
         return True
     
     try:
-        submit_forecast(qid, payload, METACULUS_TOKEN)
+        submit_forecast(qid, payload, METACULUS_TOKEN, trace=trace)
         print(f"[SUCCESS] Posted forecast for Q{qid}")
         if skip_set is not None:
             skip_set.add(qid)
@@ -1821,6 +1822,14 @@ def run_live_test():
         qid = q["id"]
         facts = news.get(qid, [])
         
+        # Initialize diagnostic trace
+        trace = None
+        if DIAGNOSTICS_USE:
+            try:
+                trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
+            except Exception as e:
+                print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
+        
         print(f"\n{'='*60}", flush=True)
         print(f"[INFO] Processing Q{qid}: {q['title']}", flush=True)
         print(f"  Type: {q['type']}", flush=True)
@@ -1831,7 +1840,8 @@ def run_live_test():
             question_obj=q,
             context_facts=facts,
             n_worlds=N_WORLDS_DEFAULT,
-            return_evidence=True
+            return_evidence=True,
+            trace=trace
         )
         
         world_summaries = mc_out.pop("world_summaries", [])
@@ -1934,6 +1944,14 @@ def run_submit_smoke_test(test_qid, publish=False):
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     facts = news.get(qid, [])
     
+    # Initialize diagnostic trace
+    trace = None
+    if DIAGNOSTICS_USE:
+        try:
+            trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
+        except Exception as e:
+            print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
+    
     print(f"[INFO] Processing Q{qid}: {title}")
     print(f"  Type: {qtype}")
     print(f"  AskNews facts: {len(facts)}")
@@ -1943,7 +1961,8 @@ def run_submit_smoke_test(test_qid, publish=False):
         question_obj=normalized,
         context_facts=facts,
         n_worlds=N_WORLDS_DEFAULT,
-        return_evidence=True
+        return_evidence=True,
+        trace=trace
     )
     
     world_summaries = mc_out.pop("world_summaries", [])
@@ -1971,7 +1990,7 @@ def run_submit_smoke_test(test_qid, publish=False):
     # Attempt submission if publish=True
     if publish:
         print(f"[INFO] Attempting to submit forecast for Q{qid}...")
-        success = post_forecast_safe(normalized, aggregate, publish=True)
+        success = post_forecast_safe(normalized, aggregate, publish=True, trace=trace)
         
         if success:
             print(f"[SUCCESS] Posted forecast for Q{qid}")
@@ -2035,13 +2054,21 @@ def run_test_mode():
         qid = q["id"]
         facts = news.get(qid, [])
         
+        # Initialize diagnostic trace
+        trace = None
+        if DIAGNOSTICS_USE:
+            try:
+                trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
+            except Exception as e:
+                print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
+        
         print(f"\n[INFO] Processing Q{qid}: {q['title']}")
         print(f"  AskNews facts: {len(facts)}")
         
         # Detect and print bounds for numeric questions
         qtype = q.get("type", "").lower()
         if "numeric" in qtype or "continuous" in qtype:
-            bounds = parse_numeric_bounds(q)
+            bounds = parse_numeric_bounds(q, trace=trace)
             if bounds:
                 print(f"  Detected numeric bounds: [{bounds[0]}, {bounds[1]}]")
             else:
@@ -2056,7 +2083,8 @@ def run_test_mode():
             question_obj=q,
             context_facts=facts,
             n_worlds=N_WORLDS_DEFAULT,
-            return_evidence=True
+            return_evidence=True,
+            trace=trace
         )
         
         # Synthesize rationale
@@ -2119,13 +2147,22 @@ def run_tournament(mode="dryrun", publish=False):
         qid = q["id"]
         facts = news.get(qid, [])
         
+        # Initialize diagnostic trace
+        trace = None
+        if DIAGNOSTICS_USE:
+            try:
+                trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
+            except Exception as e:
+                print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
+        
         print(f"\n[INFO] Processing Q{qid}: {q['title']}")
         
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
             n_worlds=N_WORLDS_DEFAULT,  # flip to N_WORLDS_TOURNAMENT for production
-            return_evidence=True
+            return_evidence=True,
+            trace=trace
         )
         
         world_summaries = mc_out.pop("world_summaries", [])
@@ -2145,7 +2182,7 @@ def run_tournament(mode="dryrun", publish=False):
             all_reasons.append(f"  • {b}")
         all_reasons.append("")
         
-        success = post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set)
+        success = post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set, trace=trace)
         if success and publish:
             posted_ids.append(qid)
     
