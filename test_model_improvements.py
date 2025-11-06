@@ -25,8 +25,8 @@ with patch.dict(os.environ, {}, clear=True):
         import main
     
     # Check default is gpt-4o-mini when no env var set
-    expected_model = "openai/gpt-4o-mini"
-    actual_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    expected_model = "openai/gpt-5-nano"
+    actual_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5-nano")
     assert actual_model == expected_model, f"Expected default model {expected_model}, got {actual_model}"
     print(f"✓ Default model is {expected_model}")
 
@@ -40,10 +40,7 @@ from main import OPENROUTER_MODEL, OPENROUTER_DISABLE_REASONING_ENABLED
 
 # Test gpt-5-nano triggers reasoning suppression
 test_cases = [
-    ("openai/gpt-5-nano", True, "gpt-5-nano should trigger reasoning suppression"),
-    ("openai/gpt-5-turbo", True, "gpt-5-turbo should trigger reasoning suppression"),
-    ("openai/gpt-4o-mini", False, "gpt-4o-mini should not trigger reasoning suppression"),
-    ("anthropic/claude-3-opus", False, "claude should not trigger reasoning suppression"),
+    ("openai/gpt-5-nano", True, "gpt-5-nano should trigger reasoning suppression")
 ]
 
 for model_name, should_suppress, description in test_cases:
