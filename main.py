@@ -1056,7 +1056,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
     
     # Add reasoning suppression for gpt-5-* models or if explicitly requested
     if OPENROUTER_DISABLE_REASONING_ENABLED or "gpt-5" in OPENROUTER_MODEL.lower():
-        payload["reasoning"] = {"effort": "none"}
+        payload["reasoning"] = {"effort": "minimal"}
         if OPENROUTER_DEBUG_ENABLED:
             print(f"[OPENROUTER DEBUG] Added reasoning suppression for model: {OPENROUTER_MODEL}", flush=True)
 
@@ -1195,7 +1195,7 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
                 "response_format": {"type": "json_object"}
             }
             if OPENROUTER_DISABLE_REASONING_ENABLED or "gpt-5" in OPENROUTER_MODEL.lower():
-                request_diag["reasoning"] = {"effort": "none"}
+                request_diag["reasoning"] = {"effort": "minimal"}
             _diag_save(trace, f"10_llm_request_{call_id}", request_diag, redact=True)
             
             # Save LLM response
