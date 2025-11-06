@@ -123,7 +123,7 @@ OPENROUTER_MODEL=openai/gpt-5-nano
 Add a repository secret named `OPENROUTER_MODEL` with your preferred model name (e.g., `openai/gpt-5-nano`).
 
 ### Special handling for gpt-5-* models
-When using gpt-5-* models (e.g., `openai/gpt-5-nano`), the bot automatically includes `reasoning: {effort: none}` in API requests to suppress the reasoning channel. This prevents empty content responses in JSON mode. You can also force this behavior for other models using `OPENROUTER_DISABLE_REASONING=true`.
+When using gpt-5-* models (e.g., `openai/gpt-5-nano`), the bot automatically includes `reasoning: {effort: minimal}` in API requests to suppress the reasoning channel. This prevents empty content responses in JSON mode. You can also force this behavior for other models using `OPENROUTER_DISABLE_REASONING=true`.
 
 ## OpenRouter Reasoning Disable (optional)
 For models that support a reasoning channel (e.g., gpt-5-*), you can explicitly disable it using `OPENROUTER_DISABLE_REASONING`. **This is automatically enabled for gpt-5-\* models** to prevent empty content in JSON mode.
