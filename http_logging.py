@@ -9,7 +9,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 
 # Check if logging is disabled (emergency opt-out)
@@ -158,7 +158,7 @@ def save_http_artifacts(
     prefix: str,
     request_dict: Dict[str, Any],
     response_dict: Optional[Dict[str, Any]] = None
-) -> tuple[Optional[Path], Optional[Path]]:
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Save HTTP request and response as JSON artifacts to disk.
     
