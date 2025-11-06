@@ -108,18 +108,14 @@ All saved artifacts automatically strip the `Authorization` header to prevent se
 When `OPENROUTER_DEBUG=false` (default), the bot operates normally without verbose logging or artifact saving. Only errors are logged as usual.
 
 ## OpenRouter Model Override (optional)
-The bot allows you to override the default OpenRouter model via the `OPENROUTER_MODEL` environment variable. **The default model is `openai/gpt-4o-mini`** which provides better JSON mode reliability than earlier models.
+The bot allows you to override the default OpenRouter model via the `OPENROUTER_MODEL` environment variable. **The default model is `openai/gpt-5-nano`** which provides better JSON mode reliability than earlier models.
 
 ### Usage
 Set the `OPENROUTER_MODEL` environment variable to specify which model to use:
 
 **In `.env` file:**
 ```bash
-# Use default model (gpt-4o-mini)
-OPENROUTER_MODEL=openai/gpt-4o-mini
-
-# Use a different model
-OPENROUTER_MODEL=anthropic/claude-3-opus
+# Use default model (gpt-5-nano)
 OPENROUTER_MODEL=openai/gpt-5-nano
 ```
 
