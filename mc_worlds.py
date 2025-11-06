@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 # Keep WORLD_PROMPT intact (per requirements)
-WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. 
+WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. You are generating ONE plausible sample of a future "world" consistent with the metadata and facts below.
 Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
 Schema (all keys required):
