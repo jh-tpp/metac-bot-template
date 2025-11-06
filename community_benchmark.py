@@ -62,7 +62,7 @@ async def benchmark_forecast_bot(mode: str) -> None:
                 predictions_per_research_report=5,
                 llms={
                     "default": GeneralLlm(
-                        model="gpt-4o-mini",
+                        model="gpt-5-nano",
                         temperature=0.3,
                     ),
                 },
@@ -71,7 +71,7 @@ async def benchmark_forecast_bot(mode: str) -> None:
                 predictions_per_research_report=1,
                 llms={
                     "default": GeneralLlm(
-                        model="gpt-4o-mini",
+                        model="gpt-5-nano",
                         temperature=0.3,
                     ),
                 },
