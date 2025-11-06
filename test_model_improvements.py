@@ -222,7 +222,7 @@ with patch('main.requests.post') as mock_post:
                         
                         # Check that reasoning suppression is in payload for gpt-5
                         assert "reasoning" in payload, "Failed: payload should include reasoning field for gpt-5 model"
-                        assert payload["reasoning"]["effort"] == "none", "Failed: reasoning effort should be 'none'"
+                        assert payload["reasoning"]["effort"] == "minimal", "Failed: reasoning effort should be 'minimal'"
                         
                         print("✓ llm_call includes reasoning suppression for gpt-5-* models")
                     except Exception as e:
