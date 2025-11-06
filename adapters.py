@@ -1,5 +1,9 @@
 import requests
 from typing import Dict, Any
+from http_logging import (
+    print_http_request, print_http_response,
+    save_http_artifacts, prepare_request_artifact, prepare_response_artifact
+)
 
 def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict:
     """
@@ -94,7 +98,30 @@ def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
         except Exception as e:
             print(f"[WARN] Failed to save submission payload diagnostics: {e}", flush=True)
     
+    # HTTP logging: log request
+    print_http_request(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload,
+        timeout=30
+    )
+    
     resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    
+    # HTTP logging: log response
+    print_http_response(resp)
+    
+    # HTTP logging: save artifacts
+    request_artifact = prepare_request_artifact(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload,
+        timeout=30
+    )
+    response_artifact = prepare_response_artifact(resp)
+    save_http_artifacts(f"metaculus_submit_{question_id}", request_artifact, response_artifact)
     
     # Save submission response diagnostics
     if trace:

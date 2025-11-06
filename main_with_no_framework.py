@@ -13,6 +13,10 @@ import numpy as np
 import requests
 from asknews_sdk import AskNewsSDK
 from openai import AsyncOpenAI
+from http_logging import (
+    print_http_request, print_http_response,
+    save_http_artifacts, prepare_request_artifact, prepare_response_artifact
+)
 
 
 """
@@ -327,7 +331,30 @@ def call_perplexity(question: str) -> str:
             },
         ],
     }
+    
+    # HTTP logging: log request
+    print_http_request(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload
+    )
+    
     response = requests.post(url=url, json=payload, headers=headers)
+    
+    # HTTP logging: log response
+    print_http_response(response)
+    
+    # HTTP logging: save artifacts
+    request_artifact = prepare_request_artifact(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload
+    )
+    response_artifact = prepare_response_artifact(response)
+    save_http_artifacts("perplexity", request_artifact, response_artifact)
+    
     if not response.ok:
         raise Exception(response.text)
     content = response.json()["choices"][0]["message"]["content"]
