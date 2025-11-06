@@ -14,6 +14,10 @@ from urllib3.util.retry import Retry
 from mc_worlds import run_mc_worlds, WORLD_PROMPT
 from adapters import mc_results_to_metaculus_payload, submit_forecast
 from diagnostics import DiagnosticTrace
+from http_logging import (
+    print_http_request, print_http_response,
+    save_http_artifacts, prepare_request_artifact, prepare_response_artifact
+)
 
 # ========== Constants ==========
 N_WORLDS_DEFAULT = 10  # for tests
@@ -597,8 +601,31 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
     
     try:
         print(f"[INFO] Fetching tournament questions with filter: {filter_desc}")
+        
+        # HTTP logging: log request
+        print_http_request(
+            method="GET",
+            url=url,
+            params=params,
+            timeout=30
+        )
+        
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
+        
+        # HTTP logging: log response
+        print_http_response(resp)
+        
+        # HTTP logging: save artifacts
+        request_artifact = prepare_request_artifact(
+            method="GET",
+            url=url,
+            params=params,
+            timeout=30
+        )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts("metaculus_list", request_artifact, response_artifact)
+        
         data = resp.json()
         
         raw_questions = data.get("results", [])
@@ -617,8 +644,29 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 try:
                     # Call detail endpoint without expand/fields to get native v2 structure
                     hydrate_url = f"{METACULUS_API_BASE}{qid}/"
+                    
+                    # HTTP logging: log request
+                    print_http_request(
+                        method="GET",
+                        url=hydrate_url,
+                        timeout=15
+                    )
+                    
                     hydrate_resp = requests.get(hydrate_url, timeout=15)
                     hydrate_resp.raise_for_status()
+                    
+                    # HTTP logging: log response
+                    print_http_response(hydrate_resp)
+                    
+                    # HTTP logging: save artifacts
+                    request_artifact = prepare_request_artifact(
+                        method="GET",
+                        url=hydrate_url,
+                        timeout=15
+                    )
+                    response_artifact = prepare_response_artifact(hydrate_resp)
+                    save_http_artifacts(f"metaculus_hydrate_{qid}", request_artifact, response_artifact)
+                    
                     hydrated_data = hydrate_resp.json()
                     
                     # Find the question in raw_questions and update it
@@ -846,6 +894,16 @@ def _get_asknews_token():
         headers = {
             "Content-Type": "application/x-www-form-urlencoded"
         }
+        
+        # HTTP logging: log request (note: auth credentials will be redacted)
+        print_http_request(
+            method="POST",
+            url=token_url,
+            headers=headers,
+            data_body=data,
+            timeout=10
+        )
+        
         # Use HTTP Basic auth (client_secret_basic) instead of client_secret_post
         resp = requests.post(
             token_url, 
@@ -855,6 +913,21 @@ def _get_asknews_token():
             timeout=10
         )
         resp.raise_for_status()
+        
+        # HTTP logging: log response
+        print_http_response(resp)
+        
+        # HTTP logging: save artifacts (auth header will be redacted)
+        request_artifact = prepare_request_artifact(
+            method="POST",
+            url=token_url,
+            headers=headers,
+            data_body=data,
+            timeout=10
+        )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts("asknews_oauth", request_artifact, response_artifact)
+        
         body = resp.json()
         token = body.get("access_token")
         if not token:
@@ -893,8 +966,33 @@ def _fetch_asknews_single(question_text, max_facts=ASKNEWS_MAX_PER_Q, token=None
             "method": "kw",
             "return_type": "dicts"
         }
+        
+        # HTTP logging: log request
+        print_http_request(
+            method="GET",
+            url=url,
+            headers=headers,
+            params=params,
+            timeout=15
+        )
+        
         resp = requests.get(url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
+        
+        # HTTP logging: log response
+        print_http_response(resp)
+        
+        # HTTP logging: save artifacts
+        request_artifact = prepare_request_artifact(
+            method="GET",
+            url=url,
+            headers=headers,
+            params=params,
+            timeout=15
+        )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts("asknews_search", request_artifact, response_artifact)
+        
         data = resp.json()
         articles = data.get("articles", [])
         facts = []
@@ -978,6 +1076,24 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
             print(f"... (truncated, {len(prompt) - 1000} more chars)", flush=True)
         print(f"{'='*70}\n", flush=True)
 
+    # HTTP logging: log request
+    print_http_request(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload,
+        timeout=90
+    )
+    
+    # HTTP logging: prepare request artifact for saving
+    request_artifact = prepare_request_artifact(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=payload,
+        timeout=90
+    )
+
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=90)
         resp.raise_for_status()
@@ -989,6 +1105,10 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
             if hasattr(e.response, 'headers'):
                 for key, value in e.response.headers.items():
                     print(f"  {key}: {value}", flush=True)
+        
+        # HTTP logging: log error response
+        if hasattr(e, 'response') and e.response is not None:
+            print_http_response(e.response)
         
         # parse body if possible to include helpful diagnostic text
         try:
@@ -1002,6 +1122,13 @@ def llm_call(prompt, max_tokens=1500, temperature=0.3, trace=None):
         )
     except Exception as e:
         raise RuntimeError(f"OpenRouter request failed: {e}")
+
+    # HTTP logging: log response
+    print_http_response(resp)
+    
+    # HTTP logging: save artifacts
+    response_artifact = prepare_response_artifact(resp)
+    save_http_artifacts("llm", request_artifact, response_artifact)
 
     # Debug logging: response details
     if OPENROUTER_DEBUG_ENABLED:
@@ -1630,9 +1757,32 @@ def _hydrate_question_with_diagnostics(qid):
         print(f"\n[HYDRATE] Q{qid} - {label}", flush=True)
         print(f"  Request headers: {headers}", flush=True)
         
+        # HTTP logging: log request
+        print_http_request(
+            method="GET",
+            url=url,
+            headers=headers,
+            params=params,
+            timeout=20
+        )
+        
         try:
             resp = session.get(url, params=params, headers=headers, timeout=20)
             resp.raise_for_status()
+            
+            # HTTP logging: log response
+            print_http_response(resp)
+            
+            # HTTP logging: save artifacts
+            request_artifact = prepare_request_artifact(
+                method="GET",
+                url=url,
+                headers=headers,
+                params=params,
+                timeout=20
+            )
+            response_artifact = prepare_response_artifact(resp)
+            save_http_artifacts(f"hydrate_attempt{i}_q{qid}", request_artifact, response_artifact)
             
             raw_text = resp.text
             parsed_obj = resp.json()
