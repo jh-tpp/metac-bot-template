@@ -52,7 +52,6 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         base_prompt += f"- {fact_truncated}\n"
     
     # Add optional JSON hint based on WORLD_JSON_HINT_ENABLED config
-    import os
     hint_enabled = os.environ.get("WORLD_JSON_HINT_ENABLED", "true").lower() in ("true", "1", "yes", "y", "on", "t")
     
     full_prompt = base_prompt
@@ -182,11 +181,13 @@ def _parse_world_output(qtype: str, raw_content_dict: Dict, options: List = None
             
             # Extract option names
             option_names = []
-            for opt in options:
+            for i, opt in enumerate(options):
                 if isinstance(opt, str):
                     option_names.append(opt)
                 elif isinstance(opt, dict):
-                    option_names.append(opt.get("name", ""))
+                    option_names.append(opt.get("name", f"Option{i}"))
+                else:
+                    option_names.append(f"Option{i}")
             
             # Parse scores in order
             scores = []
@@ -197,8 +198,8 @@ def _parse_world_output(qtype: str, raw_content_dict: Dict, options: List = None
                 except (ValueError, TypeError):
                     scores.append(0.0)
             
-            if not scores or all(s == 0 for s in scores):
-                print(f"[WARN] MC parse got all zeros: {scores_dict}", flush=True)
+            if not option_names or all(s == 0 for s in scores):
+                print(f"[WARN] MC parse got all zeros or no options: {scores_dict}", flush=True)
                 return None, None
             
             max_idx = scores.index(max(scores))
