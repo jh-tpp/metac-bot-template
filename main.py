@@ -849,35 +849,17 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 except Exception as e:
                     print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
             
-            # Pivot into core question object
-            core = _get_core_question(q)
-            
-            # Minimal type determination: core.possibilities.type if present, else core.type
-            poss = core.get("possibilities") or core.get("possibility") or {}
-            qtype = ""
-            
-            # Try possibilities.type first
-            if isinstance(poss, dict):
-                ptype = (poss.get("type") or "").strip().lower()
-                if ptype:
-                    qtype = _normalize_question_type(ptype)
-            
-            # Fallback to core.type
-            if not qtype:
-                core_type = (core.get("type") or "").strip().lower()
-                if core_type:
-                    qtype = _normalize_question_type(core_type)
+            # Use new _classify_question to get type and options
+            qtype, options_list = _classify_question(q)
             
             # Skip if type is unknown/unmappable
-            if not qtype:
-                poss_type = poss.get("type", "") if isinstance(poss, dict) else ""
-                raw_type = core.get("type", "")
-                type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
-                print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
+            if qtype is None:
+                print(f"[SKIP] Unknown/unsupported question type for Q{qid}")
                 skipped_count += 1
                 continue
             
             # Extract title and description from core
+            core = _get_core_question(q)
             title = core.get("title") or q.get("title") or ""
             description = core.get("description") or q.get("description") or ""
             
@@ -890,33 +872,9 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 "url": f"https://www.metaculus.com/questions/{qid}/"
             }
             
-            # For multiple_choice, extract options only
+            # For multiple_choice, use options from classification
             if qtype == "multiple_choice":
-                options = []
-                
-                # Try poss.outcomes[].name|label
-                if isinstance(poss, dict) and "outcomes" in poss:
-                    outcomes = poss["outcomes"]
-                    if isinstance(outcomes, list):
-                        for outcome in outcomes:
-                            if isinstance(outcome, dict):
-                                name = outcome.get("name") or outcome.get("label") or ""
-                                if name:
-                                    options.append(name)
-                
-                # Fallback to core.options[].name
-                if not options and "options" in core:
-                    options_data = core["options"]
-                    if isinstance(options_data, list):
-                        for opt in options_data:
-                            if isinstance(opt, dict):
-                                name = opt.get("name") or opt.get("label") or opt.get("title") or ""
-                                if name:
-                                    options.append(name)
-                            elif isinstance(opt, str):
-                                options.append(opt)
-                
-                normalized["options"] = options
+                normalized["options"] = options_list
             
             # Save normalized question with raw for trace (keep raw in normalized for diagnostics)
             if trace:
