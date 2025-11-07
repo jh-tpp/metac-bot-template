@@ -2514,12 +2514,23 @@ def main():
         run_live_test()
     elif args.mode == "submit_smoke_test":
         # Use --qid or QID env var
-        qid = args.qid or (int(qid_from_env) if qid_from_env else None)
+        qid = args.qid
+        if qid is None and qid_from_env:
+            try:
+                qid = int(qid_from_env)
+            except ValueError:
+                parser.error(f"QID environment variable must be a valid integer, got '{qid_from_env}'")
+        
         if qid is None:
             parser.error("--mode submit_smoke_test requires --qid or QID environment variable")
         
         # Use --worlds or WORLDS env var or default
-        worlds = args.worlds or (int(worlds_from_env) if worlds_from_env else None)
+        worlds = args.worlds
+        if worlds is None and worlds_from_env:
+            try:
+                worlds = int(worlds_from_env)
+            except ValueError:
+                parser.error(f"WORLDS environment variable must be a valid integer, got '{worlds_from_env}'")
         
         # Use --publish or PUBLISH env var
         publish = args.publish or _parse_bool_flag(publish_from_env, default=False)
@@ -2527,7 +2538,12 @@ def main():
         run_submit_smoke_test(qid, publish=publish, n_worlds=worlds)
     elif args.submit_smoke_test is not None:
         # Legacy support for --submit-smoke-test flag
-        worlds = args.worlds or (int(worlds_from_env) if worlds_from_env else None)
+        worlds = args.worlds
+        if worlds is None and worlds_from_env:
+            try:
+                worlds = int(worlds_from_env)
+            except ValueError:
+                parser.error(f"WORLDS environment variable must be a valid integer, got '{worlds_from_env}'")
         run_submit_smoke_test(args.submit_smoke_test, publish=args.publish, n_worlds=worlds)
     # Fall back to mode-based dispatch for backwards compatibility
     elif args.mode:

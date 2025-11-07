@@ -9,6 +9,7 @@ This test verifies:
 import sys
 import os
 import json
+import argparse
 import tempfile
 import shutil
 from pathlib import Path
@@ -23,8 +24,6 @@ print("="*70)
 
 # Test 1: Verify argparse accepts new arguments
 print("\nTest 1: Argparse accepts --mode submit_smoke_test --qid --worlds --publish")
-import argparse
-from main import main
 
 # Create a test parser similar to main()
 parser = argparse.ArgumentParser(description="Metaculus MC Bot")
