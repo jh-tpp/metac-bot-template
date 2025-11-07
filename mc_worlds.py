@@ -71,9 +71,28 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
             f'Output JSON: {{{summary_hint}, "answer": true|false}}'
         )
     elif qtype == "multiple_choice":
-        full_prompt += (
-            f'Output JSON: {{{summary_hint}, "scores": {{"Option1": number, "Option2": number, ...}}}}'
-        )
+        # Extract real option names to use in JSON hint
+        option_names = []
+        for i, opt in enumerate(options):
+            if isinstance(opt, str):
+                option_names.append(opt)
+            elif isinstance(opt, dict):
+                option_names.append(opt.get("name", f"Option{i}"))
+            else:
+                option_names.append(f"Option{i}")
+        
+        # Build scores dict hint with actual option names (JSON-escaped)
+        if option_names:
+            scores_hint_pairs = [f'"{json.dumps(name)[1:-1]}": number' for name in option_names]
+            scores_hint = ", ".join(scores_hint_pairs)
+            full_prompt += (
+                f'Output JSON: {{{summary_hint}, "scores": {{{scores_hint}}}}}'
+            )
+        else:
+            # Fallback to placeholder if no options (shouldn't happen)
+            full_prompt += (
+                f'Output JSON: {{{summary_hint}, "scores": {{"Option1": number, "Option2": number, ...}}}}'
+            )
     elif qtype == "numeric":
         full_prompt += (
             f'Output JSON: {{{summary_hint}, "value": number}}'
