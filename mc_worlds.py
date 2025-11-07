@@ -10,7 +10,7 @@ Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
 Schema (all keys required):
 {
-  "world_summary": "string, 180–300 words describing the world dynamics that jointly drive the outcomes below, plain English, concise.",
+  "world_summary": "string, 180–200 words describing the world dynamics that jointly drive the outcomes below, plain English, concise.",
   "per_question": [
     {
       "key": "Q01",
