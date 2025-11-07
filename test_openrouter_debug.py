@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     test_cache_dir = Path(tmpdir)
 
     # Mock environment with debug enabled
-    with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key', 'OPENROUTER_DEBUG': 'true'}, clear=False):
+    with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key', 'OPENROUTER_DEBUG': 'false'}, clear=False):
         # Reimport to pick up new env vars
         import importlib
         import main
