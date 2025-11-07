@@ -237,12 +237,15 @@ def _normalize_question_type(raw_type):
     # Type normalization mapping
     type_mapping = {
         "binary": "binary",
+        "bool": "binary",
+        "boolean": "binary",
         "multiple_choice": "multiple_choice",
         "multiplechoice": "multiple_choice",
+        "discrete": "multiple_choice",  # Metaculus v2 API uses "discrete" for multiple choice
         "mc": "multiple_choice",
         "numeric": "numeric",
         "numerical": "numeric",
-        "continuous": "numeric",
+        "continuous": "numeric",  # Metaculus v2 API uses "continuous" for numeric
         "date": "numeric",  # dates can be treated as numeric
     }
     
@@ -695,7 +698,7 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
             q_type = q.get("type", "")
             print(f"  ({qid}, {repr(poss_type)}, {repr(q_type)})")
         
-        # Normalize to pipeline format
+        # Minimal pass-through to pipeline format
         questions = []
         skipped_count = 0
         
@@ -714,13 +717,27 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 except Exception as e:
                     print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
             
-            # Use new helper to infer question type and extract fields
-            qtype, extra = _infer_qtype_and_fields(q)
+            # Pivot into core question object
+            core = _get_core_question(q)
             
-            if qtype == "unknown":
-                # Unknown/unmappable type - skip question with explicit source info
-                core = _get_core_question(q)
-                poss = core.get("possibilities") or core.get("possibility") or {}
+            # Minimal type determination: core.possibilities.type if present, else core.type
+            poss = core.get("possibilities") or core.get("possibility") or {}
+            qtype = ""
+            
+            # Try possibilities.type first
+            if isinstance(poss, dict):
+                ptype = (poss.get("type") or "").strip().lower()
+                if ptype:
+                    qtype = _normalize_question_type(ptype)
+            
+            # Fallback to core.type
+            if not qtype:
+                core_type = (core.get("type") or "").strip().lower()
+                if core_type:
+                    qtype = _normalize_question_type(core_type)
+            
+            # Skip if type is unknown/unmappable
+            if not qtype:
                 poss_type = poss.get("type", "") if isinstance(poss, dict) else ""
                 raw_type = core.get("type", "")
                 type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
@@ -729,11 +746,10 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 continue
             
             # Extract title and description from core
-            core = _get_core_question(q)
             title = core.get("title") or q.get("title") or ""
             description = core.get("description") or q.get("description") or ""
             
-            # Build normalized question
+            # Build minimal normalized question
             normalized = {
                 "id": qid,
                 "type": qtype,
@@ -742,28 +758,33 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 "url": f"https://www.metaculus.com/questions/{qid}/"
             }
             
-            # Handle multiple choice options
+            # For multiple_choice, extract options only
             if qtype == "multiple_choice":
-                options = extra.get("options", [])
-                normalized["options"] = [{"name": name} for name in options]
-            else:
-                normalized["options"] = []
-            
-            # Handle numeric bounds
-            if qtype == "numeric":
-                numeric_bounds = extra.get("numeric_bounds", {})
-                if "min" in numeric_bounds:
-                    try:
-                        normalized["min"] = float(numeric_bounds["min"])
-                    except (ValueError, TypeError):
-                        # For date strings, keep as-is (will be handled by downstream code)
-                        normalized["min"] = numeric_bounds["min"]
-                if "max" in numeric_bounds:
-                    try:
-                        normalized["max"] = float(numeric_bounds["max"])
-                    except (ValueError, TypeError):
-                        # For date strings, keep as-is (will be handled by downstream code)
-                        normalized["max"] = numeric_bounds["max"]
+                options = []
+                
+                # Try poss.outcomes[].name|label
+                if isinstance(poss, dict) and "outcomes" in poss:
+                    outcomes = poss["outcomes"]
+                    if isinstance(outcomes, list):
+                        for outcome in outcomes:
+                            if isinstance(outcome, dict):
+                                name = outcome.get("name") or outcome.get("label") or ""
+                                if name:
+                                    options.append(name)
+                
+                # Fallback to core.options[].name
+                if not options and "options" in core:
+                    options_data = core["options"]
+                    if isinstance(options_data, list):
+                        for opt in options_data:
+                            if isinstance(opt, dict):
+                                name = opt.get("name") or opt.get("label") or opt.get("title") or ""
+                                if name:
+                                    options.append(name)
+                            elif isinstance(opt, str):
+                                options.append(opt)
+                
+                normalized["options"] = options
             
             # Save normalized question with raw for trace (keep raw in normalized for diagnostics)
             if trace:
@@ -1717,15 +1738,15 @@ def _create_session_with_retry():
 def _hydrate_question_with_diagnostics(qid):
     """
     Fetch a single question from Metaculus API with comprehensive diagnostics.
-    Tries multiple URL and parameter variants, logging each attempt.
+    Uses only the preferred detail URL with trailing slash.
     
     Args:
         qid: Question ID
     
     Returns:
-        Merged question dict or None on failure
+        Question dict or None on failure
     """
-    print(f"\n[HYDRATE] Starting comprehensive fetch for Q{qid}", flush=True)
+    print(f"\n[HYDRATE] Starting fetch for Q{qid}", flush=True)
     
     session = _create_session_with_retry()
     headers = {
@@ -1733,120 +1754,65 @@ def _hydrate_question_with_diagnostics(qid):
         "User-Agent": "metac-bot-template/1.0"
     }
     
-    # Try multiple variants in order
-    attempts = [
-        {
-            "label": "attempt 1: with trailing slash, plain detail (preferred)",
-            "url": f"{METACULUS_API_BASE}{qid}/",
-            "params": {}
-        },
-        {
-            "label": "attempt 2: no trailing slash, plain detail",
-            "url": f"{METACULUS_API_BASE}{qid}",
-            "params": {}
-        }
-    ]
+    # Use only the preferred URL: with trailing slash, plain detail
+    url = f"{METACULUS_API_BASE}{qid}/"
+    params = {}
+    label = "detail with trailing slash"
     
-    merged_data = None
+    print(f"\n[HYDRATE] Q{qid} - {label}", flush=True)
+    print(f"  Request headers: {headers}", flush=True)
     
-    for i, attempt in enumerate(attempts, 1):
-        label = attempt["label"]
-        url = attempt["url"]
-        params = attempt["params"]
+    # HTTP logging: log request
+    print_http_request(
+        method="GET",
+        url=url,
+        headers=headers,
+        params=params,
+        timeout=20
+    )
+    
+    try:
+        resp = session.get(url, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
         
-        print(f"\n[HYDRATE] Q{qid} - {label}", flush=True)
-        print(f"  Request headers: {headers}", flush=True)
+        # HTTP logging: log response
+        print_http_response(resp)
         
-        # HTTP logging: log request
-        print_http_request(
+        # HTTP logging: save artifacts
+        request_artifact = prepare_request_artifact(
             method="GET",
             url=url,
             headers=headers,
             params=params,
             timeout=20
         )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts(f"hydrate_q{qid}", request_artifact, response_artifact)
         
-        try:
-            resp = session.get(url, params=params, headers=headers, timeout=20)
-            resp.raise_for_status()
-            
-            # HTTP logging: log response
-            print_http_response(resp)
-            
-            # HTTP logging: save artifacts
-            request_artifact = prepare_request_artifact(
-                method="GET",
-                url=url,
-                headers=headers,
-                params=params,
-                timeout=20
-            )
-            response_artifact = prepare_response_artifact(resp)
-            save_http_artifacts(f"hydrate_attempt{i}_q{qid}", request_artifact, response_artifact)
-            
-            raw_text = resp.text
-            parsed_obj = resp.json()
-            
-            # Log comprehensive diagnostics
-            _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params)
-            
-            # Write debug files
-            prefix = f"debug_q_{qid}_att{i}"
-            _write_debug_files(prefix, raw_text, parsed_obj)
-            
-            # Merge into working object
-            if merged_data is None:
-                merged_data = parsed_obj
-            else:
-                # If parsed_obj has a nested 'question', merge its contents
-                if "question" in parsed_obj and isinstance(parsed_obj["question"], dict):
-                    nested_q = parsed_obj["question"]
-                    # Merge nested question into merged_data's question (or create it)
-                    if "question" not in merged_data or not isinstance(merged_data["question"], dict):
-                        merged_data["question"] = {}
-                    merged_data["question"].update(nested_q)
-                    print(f"[HYDRATE] Q{qid} - Merged nested question from {label}", flush=True)
-                
-                # Also merge top-level possibility/possibilities if present
-                if "possibility" in parsed_obj and parsed_obj["possibility"]:
-                    merged_data["possibility"] = parsed_obj["possibility"]
-                    print(f"[HYDRATE] Q{qid} - Merged possibility from {label}", flush=True)
-                
-                if "possibilities" in parsed_obj and parsed_obj["possibilities"]:
-                    merged_data["possibilities"] = parsed_obj["possibilities"]
-                    print(f"[HYDRATE] Q{qid} - Merged possibilities from {label}", flush=True)
-                
-                # Merge top-level type fields
-                for field in ["type", "title", "description", "possibility_type", "prediction_type", "question_type", "value_type", "outcome_type"]:
-                    if field in parsed_obj and parsed_obj[field]:
-                        merged_data[field] = parsed_obj[field]
-                        print(f"[HYDRATE] Q{qid} - Merged {field} from {label}", flush=True)
-            
-            print(f"[HYDRATE] Q{qid} - {label} SUCCESS", flush=True)
-            
-        except requests.exceptions.HTTPError as e:
-            print(f"[HYDRATE] Q{qid} - {label} FAILED: HTTP {e.response.status_code}", flush=True)
-            traceback.print_exc()
-        except requests.exceptions.Timeout as e:
-            print(f"[HYDRATE] Q{qid} - {label} FAILED: Timeout", flush=True)
-            traceback.print_exc()
-        except Exception as e:
-            print(f"[HYDRATE] Q{qid} - {label} FAILED: {type(e).__name__}: {e}", flush=True)
-            traceback.print_exc()
-    
-    # Write final merged object
-    if merged_data:
-        print(f"\n[HYDRATE] Q{qid} - Writing final merged object", flush=True)
+        raw_text = resp.text
+        parsed_obj = resp.json()
+        
+        # Log comprehensive diagnostics
+        _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params)
+        
+        # Write debug files
+        prefix = f"debug_q_{qid}"
+        _write_debug_files(prefix, raw_text, parsed_obj)
+        
+        print(f"[HYDRATE] Q{qid} - SUCCESS", flush=True)
+        
+        # Write final object
+        print(f"\n[HYDRATE] Q{qid} - Writing final object", flush=True)
         final_prefix = f"debug_q_{qid}_final"
         try:
             final_file = f"{final_prefix}.json"
             with open(final_file, "w", encoding="utf-8") as f:
-                json.dump(merged_data, f, indent=2, ensure_ascii=False)
-            print(f"[HYDRATE] Q{qid} - Wrote final merged object to {final_file}", flush=True)
-            print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(merged_data.keys())}", flush=True)
+                json.dump(parsed_obj, f, indent=2, ensure_ascii=False)
+            print(f"[HYDRATE] Q{qid} - Wrote final object to {final_file}", flush=True)
+            print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(parsed_obj.keys())}", flush=True)
             
-            # Normalize the merged object and write normalized version
-            normalized = _normalize_question_object(merged_data)
+            # Normalize the object and write normalized version
+            normalized = _normalize_question_object(parsed_obj)
             if normalized:
                 normalized_file = f"{final_prefix}_normalized.json"
                 with open(normalized_file, "w", encoding="utf-8") as f:
@@ -1856,14 +1822,25 @@ def _hydrate_question_with_diagnostics(qid):
                 print(f"[HYDRATE] Q{qid} - Wrote normalized object to {normalized_file}", flush=True)
                 print(f"[HYDRATE] Q{qid} - Normalized type: {normalized.get('type')}", flush=True)
             else:
-                print(f"[HYDRATE] Q{qid} - Could not normalize merged object (unknown type)", flush=True)
+                print(f"[HYDRATE] Q{qid} - Could not normalize object (unknown type)", flush=True)
         except Exception as e:
-            print(f"[ERROR] Failed to write final merged object for Q{qid}: {e}", flush=True)
+            print(f"[ERROR] Failed to write final object for Q{qid}: {e}", flush=True)
             traceback.print_exc()
-    else:
-        print(f"[HYDRATE] Q{qid} - FAILED: No successful fetches", flush=True)
-    
-    return merged_data
+        
+        return parsed_obj
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"[HYDRATE] Q{qid} - FAILED: HTTP {e.response.status_code}", flush=True)
+        traceback.print_exc()
+        return None
+    except requests.exceptions.Timeout as e:
+        print(f"[HYDRATE] Q{qid} - FAILED: Timeout", flush=True)
+        traceback.print_exc()
+        return None
+    except Exception as e:
+        print(f"[HYDRATE] Q{qid} - FAILED: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        return None
 
 def run_live_test():
     """
