@@ -216,6 +216,56 @@ You can change which file is run in the GitHub automation by either changing the
 ## Editing in GitHub UI
 Remember that you can edit a bot non locally by clicking on a file in Github, and then clicking the 'Edit this file' button. Whether you develop locally or not, when making edits, attempt to do things that you think others have not tried, as this will help further innovation in the field more than doing something that has already been done. Feel free to ask about what has or has not been tried in the Discord.
 
+## Single Question Submission Workflow
+You can manually test forecasts on individual Metaculus questions using the "Submit Single Question" workflow. This is useful for:
+- Testing your bot on specific questions without running the full tournament
+- Debugging forecast generation for particular question types
+- Dry-run testing before actual submission
+
+### Using the GitHub Actions Workflow
+1. Go to the "Actions" tab in your repository
+2. Select "Submit Single Question" from the workflow list
+3. Click "Run workflow"
+4. Fill in the inputs:
+   - **qid** (required): The Metaculus question ID (e.g., 578)
+   - **worlds** (optional): Number of MC worlds to generate (default: 100)
+   - **publish** (optional): Check to actually submit the forecast to Metaculus (default: false for dry-run)
+5. Click "Run workflow" to start
+
+The workflow will:
+- Fetch the question from Metaculus
+- Classify the question type (binary, multiple_choice, or numeric)
+- Generate MC worlds and aggregate forecasts
+- Upload artifacts including:
+  - `submit_smoke_payload.json` - The forecast payload (always created)
+  - `mc_results.json` - Full forecast results
+  - `mc_reasons.txt` - Reasoning bullets
+  - `trace/` - Diagnostic traces (if diagnostics enabled)
+  - `posted_ids.json` - Posted question IDs (only if publish=true)
+
+### Using the CLI locally
+You can also run single question forecasts from the command line:
+
+**Dry-run mode (recommended for testing):**
+```bash
+poetry run python main.py --mode submit_smoke_test --qid 578 --worlds 100
+```
+
+**Actually submit the forecast:**
+```bash
+poetry run python main.py --mode submit_smoke_test --qid 578 --worlds 100 --publish
+```
+
+**Using environment variables:**
+```bash
+export QID=578
+export WORLDS=100
+export PUBLISH=true
+poetry run python main.py --mode submit_smoke_test
+```
+
+The single question mode respects all existing environment variables (OPENROUTER_API_KEY, ASKNEWS_ENABLED, DIAGNOSTICS_ENABLED, etc.) and produces the same output artifacts as the workflow.
+
 ## Run/Edit the bot locally
 Clone the repository. Find your terminal and run the following commands:
 ```bash

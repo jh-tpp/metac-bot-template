@@ -1,0 +1,99 @@
+name: Submit Single Question
+
+on:
+  workflow_dispatch:
+    inputs:
+      qid:
+        description: 'Metaculus question ID'
+        required: true
+        type: string
+      worlds:
+        description: 'Number of MC worlds to generate'
+        required: false
+        default: '100'
+        type: string
+      publish:
+        description: 'Actually submit forecast to Metaculus'
+        required: false
+        default: false
+        type: boolean
+
+# Add concurrency group to prevent parallel runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.qid }}
+  cancel-in-progress: false
+
+jobs:
+  submit_single_question_job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      
+      - name: Convert publish flag
+        id: publish_flag
+        run: |
+          if [ "${{ github.event.inputs.publish }}" = "true" ]; then
+            echo "flag=--publish" >> $GITHUB_OUTPUT
+          else
+            echo "flag=" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Run submit_smoke_test
+        run: |
+          poetry run python main.py --mode submit_smoke_test --qid ${{ github.event.inputs.qid }} --worlds ${{ github.event.inputs.worlds }} ${{ steps.publish_flag.outputs.flag }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      
+      - name: Upload submit_smoke_payload.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: submit-smoke-payload
+          path: submit_smoke_payload.json
+      
+      - name: Upload MC results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-results
+          path: mc_results.json
+      
+      - name: Upload MC reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mc-reasons
+          path: mc_reasons.txt
+      
+      - name: Upload posted IDs
+        if: github.event.inputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: posted-ids
+          path: posted_ids.json
+      
+      - name: Upload trace artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace
+          path: cache/trace/**
+          if-no-files-found: ignore

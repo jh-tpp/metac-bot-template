@@ -2113,15 +2113,19 @@ def run_live_test():
     print("  - debug_q_*.json (parsed API responses)", flush=True)
     print("  - debug_q_{id}_final.json (final merged objects)", flush=True)
 
-def run_submit_smoke_test(test_qid, publish=False):
+def run_submit_smoke_test(test_qid, publish=False, n_worlds=None):
     """
     Submit smoke test for a single question ID.
     
     Args:
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
     """
-    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish})...", flush=True)
+    if n_worlds is None:
+        n_worlds = N_WORLDS_DEFAULT
+    
+    print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish}, worlds={n_worlds})...", flush=True)
     
     # Fetch question
     print(f"[INFO] Fetching question {test_qid}...", flush=True)
@@ -2140,7 +2144,8 @@ def run_submit_smoke_test(test_qid, publish=False):
         print(f"[ERROR] Unknown question type for Q{qid}. Aborting.", flush=True)
         return
     
-    print(f"[INFO] Q{qid} inferred type: {qtype}", flush=True)
+    # Explicit console log line per requirements
+    print(f"[SUBMIT SINGLE] Q{qid} type={qtype} worlds={n_worlds} publish={publish}", flush=True)
     
     # Extract title and description from core
     core = _get_core_question(q)
@@ -2211,7 +2216,7 @@ def run_submit_smoke_test(test_qid, publish=False):
     mc_out = run_mc_worlds(
         question_obj=normalized,
         context_facts=facts,
-        n_worlds=N_WORLDS_DEFAULT,
+        n_worlds=n_worlds,
         return_evidence=True,
         trace=trace
     )
@@ -2238,6 +2243,14 @@ def run_submit_smoke_test(test_qid, publish=False):
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(reasons))
     
+    # Build submission payload
+    payload = mc_results_to_metaculus_payload(normalized, aggregate)
+    
+    # Write submit_smoke_payload.json (always, per requirements)
+    with open("submit_smoke_payload.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print("[INFO] Wrote submit_smoke_payload.json", flush=True)
+    
     # Attempt submission if publish=True
     if publish:
         print(f"[INFO] Attempting to submit forecast for Q{qid}...")
@@ -2251,10 +2264,11 @@ def run_submit_smoke_test(test_qid, publish=False):
         else:
             print(f"[ERROR] Failed to post forecast for Q{qid}")
     else:
-        print(f"[DRYRUN] Would post forecast for Q{qid}")
+        print(f"[DRYRUN] Would post forecast for Q{qid}", flush=True)
+        print(f"[DRYRUN] Payload written to submit_smoke_payload.json", flush=True)
     
-    print(f"[SUBMIT SMOKE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt" + 
-          (", posted_ids.json" if publish else ""))
+    print(f"[SUBMIT SMOKE TEST] Complete. Artifacts: mc_results.json, mc_reasons.txt, submit_smoke_payload.json" + 
+          (", posted_ids.json" if publish else ""), flush=True)
 
 # ========== Test Mode ==========
 def run_test_mode():
@@ -2457,8 +2471,8 @@ def main():
     parser = argparse.ArgumentParser(description="Metaculus MC Bot")
     parser.add_argument(
         "--mode",
-        choices=["test_questions", "tournament_dryrun", "tournament_submit"],
-        help="Run mode (deprecated, use specific flags instead)"
+        choices=["test_questions", "tournament_dryrun", "tournament_submit", "submit_smoke_test"],
+        help="Run mode (deprecated for some, use specific flags instead)"
     )
     parser.add_argument(
         "--live-test",
@@ -2469,20 +2483,52 @@ def main():
         "--submit-smoke-test",
         type=int,
         metavar="QID",
-        help="Submit smoke test for a single question ID"
+        help="Submit smoke test for a single question ID (deprecated, use --mode submit_smoke_test --qid instead)"
+    )
+    parser.add_argument(
+        "--qid",
+        type=int,
+        metavar="QID",
+        help="Question ID for submit_smoke_test mode"
+    )
+    parser.add_argument(
+        "--worlds",
+        type=int,
+        metavar="N",
+        help="Number of MC worlds to generate (default: N_WORLDS_DEFAULT)"
     )
     parser.add_argument(
         "--publish",
         action="store_true",
-        help="Actually submit forecasts (use with --submit-smoke-test)"
+        help="Actually submit forecasts (use with submit_smoke_test modes)"
     )
     args = parser.parse_args()
+    
+    # Handle environment variables as fallbacks
+    qid_from_env = os.environ.get("QID")
+    worlds_from_env = os.environ.get("WORLDS")
+    publish_from_env = os.environ.get("PUBLISH")
     
     # Handle new flags first
     if args.live_test:
         run_live_test()
+    elif args.mode == "submit_smoke_test":
+        # Use --qid or QID env var
+        qid = args.qid or (int(qid_from_env) if qid_from_env else None)
+        if qid is None:
+            parser.error("--mode submit_smoke_test requires --qid or QID environment variable")
+        
+        # Use --worlds or WORLDS env var or default
+        worlds = args.worlds or (int(worlds_from_env) if worlds_from_env else None)
+        
+        # Use --publish or PUBLISH env var
+        publish = args.publish or _parse_bool_flag(publish_from_env, default=False)
+        
+        run_submit_smoke_test(qid, publish=publish, n_worlds=worlds)
     elif args.submit_smoke_test is not None:
-        run_submit_smoke_test(args.submit_smoke_test, publish=args.publish)
+        # Legacy support for --submit-smoke-test flag
+        worlds = args.worlds or (int(worlds_from_env) if worlds_from_env else None)
+        run_submit_smoke_test(args.submit_smoke_test, publish=args.publish, n_worlds=worlds)
     # Fall back to mode-based dispatch for backwards compatibility
     elif args.mode:
         if args.mode == "test_questions":
