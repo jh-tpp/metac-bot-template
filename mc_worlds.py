@@ -83,7 +83,8 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         
         # Build scores dict hint with actual option names (JSON-escaped)
         if option_names:
-            scores_hint_pairs = [f'"{json.dumps(name)[1:-1]}": number' for name in option_names]
+            # Use json.dumps to properly escape option names (includes quotes)
+            scores_hint_pairs = [f'{json.dumps(name)}: number' for name in option_names]
             scores_hint = ", ".join(scores_hint_pairs)
             full_prompt += (
                 f'Output JSON: {{{summary_hint}, "scores": {{{scores_hint}}}}}'
