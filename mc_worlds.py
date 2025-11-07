@@ -380,24 +380,15 @@ Based on your analysis, what is your best point estimate? Respond with ONLY JSON
         raise RuntimeError("No valid numeric worlds generated")
     
     # Average values directly (no normalization/clamping)
+    # Infer grid bounds from sampled values
     values.sort()
+    lo = min(values)
+    hi = max(values)
     
-    # Build CDF on fixed grid
-    # Use question bounds if available, otherwise infer from samples
-    min_val = question_obj.get("min")
-    max_val = question_obj.get("max")
-    
-    if min_val is not None and max_val is not None:
-        try:
-            lo = float(min_val)
-            hi = float(max_val)
-        except (ValueError, TypeError):
-            # If bounds are not numeric (e.g., date strings), infer from samples
-            lo = min(values)
-            hi = max(values)
-    else:
-        lo = min(values)
-        hi = max(values)
+    # Add small padding to ensure all values are within grid
+    range_padding = (hi - lo) * 0.05 if hi > lo else 1.0
+    lo = lo - range_padding
+    hi = hi + range_padding
     
     # Create grid
     grid = [lo + (hi - lo) * i / 100 for i in range(101)]
