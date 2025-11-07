@@ -186,6 +186,41 @@ The world prompt system has been simplified to remove intrusive elements:
 
 This architecture provides flexibility while maintaining reliability. The unified `run_mc_worlds` function handles all question types (binary, multiple_choice, numeric) with consistent logic.
 
+## World Max Tokens (optional)
+The bot supports a `WORLD_MAX_TOKENS` environment variable to control the maximum number of tokens for world generation LLM calls. **The default is 700 tokens.** This ensures that world summaries (~180-200 words) plus JSON fields can be generated without truncation.
+
+### Usage
+Set the `WORLD_MAX_TOKENS` environment variable to configure the token limit:
+
+**In `.env` file:**
+```bash
+# Set custom max tokens for world generation (default 700)
+WORLD_MAX_TOKENS=700
+
+# Increase if you see truncated JSON or "finish_reason=length" errors
+WORLD_MAX_TOKENS=1000
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `WORLD_MAX_TOKENS` with your desired token limit (e.g., `700`).
+
+### When to adjust
+- **Increase** if you observe:
+  - JSON parse errors due to unterminated strings
+  - `finish_reason=length` in logs (response truncated)
+  - `parse=FAIL` messages for world generation
+- **Decrease** if you want to:
+  - Reduce API costs
+  - Force more concise world summaries
+
+### Default value rationale
+The default of 700 tokens allows:
+- ~180-200 word world_summary (as requested in prompts)
+- JSON structure overhead (`{"world_summary": "...", "answer": ...}`)
+- Reasonable buffer for LLM formatting variations
+
+Previous default of 200 tokens was insufficient, causing mid-JSON truncation errors.
+
 ## Diagnostics (optional)
 The bot supports comprehensive per-question diagnostic tracing via the `DIAGNOSTICS_ENABLED` environment variable. **Diagnostics are enabled by default.** This feature saves detailed JSON artifacts for each question throughout the forecasting pipeline, making it trivial to see exactly what was sent to the LLM, what was received, and how each downstream step transformed the data.
 
