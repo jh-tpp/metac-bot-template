@@ -26,7 +26,7 @@ ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
 CACHE_DIR = Path("cache")
 NEWS_CACHE_FILE = CACHE_DIR / "news_cache.json"
-METACULUS_API_BASE = "https://www.metaculus.com/api2/questions/"
+METACULUS_API_BASE = "https://www.metaculus.com/api/questions/"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5-nano")
