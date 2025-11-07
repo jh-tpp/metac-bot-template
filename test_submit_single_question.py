@@ -130,9 +130,16 @@ mock_result = {
     "reasoning": ["Test reason 1", "Test reason 2"]
 }
 
-# Test payload creation
+# Test payload creation (original format)
 payload = mc_results_to_metaculus_payload(mock_question, mock_result)
-assert "prediction" in payload, f"Expected 'prediction' in payload, got {list(payload.keys())}"
+assert "probability_yes" in payload, f"Expected 'probability_yes' in payload, got {list(payload.keys())}"
+assert "probability_yes_per_category" in payload, f"Expected 'probability_yes_per_category' in payload"
+assert "continuous_cdf" in payload, f"Expected 'continuous_cdf' in payload"
+
+# Verify binary question values
+assert payload["probability_yes"] == 0.65, f"Expected probability_yes=0.65, got {payload['probability_yes']}"
+assert payload["probability_yes_per_category"] is None, "Expected probability_yes_per_category=None for binary"
+assert payload["continuous_cdf"] is None, "Expected continuous_cdf=None for binary"
 
 # Verify payload can be serialized to JSON
 try:
