@@ -1,10 +1,40 @@
-# Security Summary for HTTP Logging Implementation
+# Security Summary
 
-## CodeQL Analysis Results
+## Latest: Restore Original Forecast and Comment Submission Logic
+
+### CodeQL Analysis Results
+- **Status**: ✅ PASSED
+- **Alerts Found**: 0
+- **Language**: Python
+- **Scan Date**: 2025-11-07
+
+### Security Review
+
+**Changes Made:**
+- Switched from `/api2/` to `/api/` endpoints (original Metaculus format)
+- Changed forecast payload to array format: `[{"question": <id>, ...}]`
+- Added comment submission via `/api/comments/create/`
+- Updated payload structure to use original fields
+
+**Security Measures:**
+- ✅ Token-based authentication properly implemented
+- ✅ Tokens redacted in all logs and diagnostics
+- ✅ Input validation for all question types
+- ✅ Proper error handling without exposing sensitive data
+- ✅ HTTPS used for all API calls
+- ✅ Comments marked as private (`is_private: true`)
+
+**Conclusion**: ✅ No security vulnerabilities. Safe for production use.
+
+---
+
+## Previous: HTTP Logging Implementation
+
+### CodeQL Analysis Results
 
 CodeQL found 1 alert during the security scan:
 
-### Alert 1: py/incomplete-url-substring-sanitization
+#### Alert 1: py/incomplete-url-substring-sanitization
 - **Location**: test_http_logging_integration.py:97
 - **Severity**: Low
 - **Status**: False Positive - Safe to Ignore
@@ -21,7 +51,7 @@ This is part of a unit test that validates logging output contains the expected 
 3. No user input is involved
 4. No actual HTTP requests are made (uses mocks)
 
-## Security Features Implemented
+### Security Features Implemented
 
 The HTTP logging implementation includes strong security measures:
 
@@ -44,14 +74,14 @@ The HTTP logging implementation includes strong security measures:
    - Already covered by `cache/` in .gitignore
    - Won't be accidentally committed to version control
 
-## Verification
+### Verification
 
 All security features have been tested:
 - Test coverage for `sanitize_headers()` function
 - Integration tests verify redaction works in practice
 - Manual testing confirms Authorization headers show `[REDACTED]`
 
-## Conclusion
+### Conclusion
 
 ✅ No security vulnerabilities introduced by this PR
 ✅ Strong secret redaction implemented and tested

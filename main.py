@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 
 # Local modules
 from mc_worlds import run_mc_worlds, WORLD_PROMPT
-from adapters import mc_results_to_metaculus_payload, submit_forecast
+from adapters import mc_results_to_metaculus_payload, submit_forecast, submit_comment
 from diagnostics import DiagnosticTrace
 from http_logging import (
     print_http_request, print_http_response,
@@ -1791,13 +1791,32 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, tr
     
     payload = mc_results_to_metaculus_payload(question_obj, mc_result)
     
+    # Extract reasoning for comment submission (AFTER forecast)
+    reasoning_text = "\n".join(mc_result.get("reasoning", []))
+    
     if not publish:
         print(f"[DRYRUN] Would post to Q{qid}: {payload}")
+        if reasoning_text:
+            print(f"[DRYRUN] Would post comment with {len(reasoning_text)} chars")
         return True
     
     try:
+        # Step 1: Submit forecast FIRST
         submit_forecast(qid, payload, METACULUS_TOKEN, trace=trace)
         print(f"[SUCCESS] Posted forecast for Q{qid}")
+        
+        # Step 2: Submit reasoning comment AFTER forecast (if available)
+        if reasoning_text:
+            # Original template uses post_id for comments
+            # If question object has post_id, use it; otherwise use question_id as fallback
+            post_id = question_obj.get("post_id") or qid
+            try:
+                submit_comment(post_id, reasoning_text, METACULUS_TOKEN, trace=trace)
+                print(f"[SUCCESS] Posted reasoning comment for Q{qid} (post_id={post_id})")
+            except Exception as comment_error:
+                # Don't fail the whole operation if comment fails
+                print(f"[WARN] Failed to post comment for Q{qid}: {comment_error}")
+        
         if skip_set is not None:
             skip_set.add(qid)
         return True
