@@ -23,6 +23,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.inputs.qid }}
   cancel-in-progress: false
 
+# Set minimal permissions for GITHUB_TOKEN
+permissions:
+  contents: read
+
 jobs:
   submit_single_question_job:
     runs-on: ubuntu-latest
