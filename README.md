@@ -142,6 +142,50 @@ OPENROUTER_DISABLE_REASONING=false
 - To enable: `true`, `1`, `yes`, `y`, `on`, `t`
 - To disable (default): `false`, `0`, `no`, `n`, `off`, `f` (or leave unset)
 
+## World JSON Hint (optional)
+The bot supports a `WORLD_JSON_HINT_ENABLED` environment variable to control whether a minimal JSON format hint is appended to world prompts. **JSON hints are enabled by default.** This provides a lightweight way to guide the LLM on the expected output format without intrusive "You are a superforecaster" system messages or complex schema blocks.
+
+### Usage
+Set the `WORLD_JSON_HINT_ENABLED` environment variable to enable or disable JSON format hints:
+
+**In `.env` file:**
+```bash
+# Enable JSON hints (default)
+WORLD_JSON_HINT_ENABLED=true
+
+# Disable JSON hints (raw world prompt only)
+WORLD_JSON_HINT_ENABLED=false
+```
+
+**In GitHub Actions secrets:**
+Add a repository secret named `WORLD_JSON_HINT_ENABLED` with value `true` to enable (default), or `false` to disable.
+
+**Accepted values:**
+- To enable (default): `true`, `1`, `yes`, `y`, `on`, `t` (or leave unset)
+- To disable: `false`, `0`, `no`, `n`, `off`, `f`
+
+### Behavior when enabled
+When `WORLD_JSON_HINT_ENABLED=true` (default), the bot appends a minimal one-line JSON format hint to world prompts:
+- **Binary**: `Output JSON: {"answer": true} or {"answer": false}`
+- **Multiple choice**: `Output JSON: {"scores": {"Option1": number, "Option2": number, ...}}`
+- **Numeric**: `Output JSON: {"value": number}`
+
+These hints are appended after the question, description, and recent facts. The base world prompt focuses on forecasting discipline without prescriptive schema instructions.
+
+### Behavior when disabled
+When `WORLD_JSON_HINT_ENABLED=false`, no JSON format hint is appended. The LLM receives only the simplified world prompt (Tetlockian forecasting discipline) plus question context and facts. This gives you complete control over prompting without editing code.
+
+### Simplified Prompting Architecture
+The world prompt system has been simplified to remove intrusive elements:
+- ❌ Removed "You are a superforecaster" system role messages
+- ❌ Removed multi-line strict JSON schema blocks
+- ✅ Simplified base prompt focuses on forecasting methodology (Tetlockian techniques, base rates, bias consideration)
+- ✅ Minimal per-type JSON hints (optional, controlled by config)
+- ✅ Lenient parsing with robust fallbacks for common output variations
+- ✅ Per-world logging: `[WORLD] Q{qid} world {i+1}/{n} parse=OK/FAIL`
+
+This architecture provides flexibility while maintaining reliability. The unified `run_mc_worlds` function handles all question types (binary, multiple_choice, numeric) with consistent logic.
+
 ## Diagnostics (optional)
 The bot supports comprehensive per-question diagnostic tracing via the `DIAGNOSTICS_ENABLED` environment variable. **Diagnostics are enabled by default.** This feature saves detailed JSON artifacts for each question throughout the forecasting pipeline, making it trivial to see exactly what was sent to the LLM, what was received, and how each downstream step transformed the data.
 
