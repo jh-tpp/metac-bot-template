@@ -3,7 +3,7 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *" # runs every 10 minutes
+    - cron: "*/30 * * * *" # runs every 10 minutes
 
 # Add concurrency group to prevent parallel runs
 concurrency:
