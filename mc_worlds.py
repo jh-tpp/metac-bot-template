@@ -56,14 +56,25 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
     hint_enabled = os.environ.get("WORLD_JSON_HINT_ENABLED", "true").lower() in ("true", "1", "yes", "y", "on", "t")
     
     full_prompt = base_prompt
+
+    summary_hint = (
+    '"world_summary": "string, 180–200 words describing the world dynamics that jointly drive the outcomes below, plain English, concise."'
+    )
+    
     if hint_enabled:
         full_prompt += "\n"
         if qtype == "binary":
-            full_prompt += 'Output JSON: {"answer": true} or {"answer": false}'
+            full_prompt += (
+                f'Output JSON: {{{summary_hint}, "answer": true|false}}'
+            )
         elif qtype == "multiple_choice":
-            full_prompt += 'Output JSON: {"scores": {"Option1": number, "Option2": number, ...}}'
+            full_prompt += (
+                f'Output JSON: {{{summary_hint}, "scores": {{"Option1": number, "Option2": number, ...}}}}'
+            )
         elif qtype == "numeric":
-            full_prompt += 'Output JSON: {"value": number}'
+            full_prompt += (
+                f'Output JSON: {{{summary_hint}, "value": number}}'
+            )
     
     # Collect world results
     world_results = []
