@@ -43,10 +43,10 @@ FACTS:
 
 def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False, trace=None) -> Dict[str, Any]:
     """
-    Run Monte-Carlo sampling of joint worlds, aggregate forecasts.
+    Run Monte-Carlo sampling with per-type LLM schemas and simple aggregation.
     
     Args:
-        question_obj: Metaculus question dict
+        question_obj: Metaculus question dict (minimal: id, type, title, description, url, options?)
         context_facts: list of news facts
         n_worlds: number of MC samples
         return_evidence: if True, return world_summaries for rationale synthesis
@@ -56,222 +56,397 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
         dict with 'p' (binary), 'probs' (MC), or 'cdf'/'grid' (numeric),
         plus optionally 'world_summaries' if return_evidence=True
     """
-    from main import llm_call, parse_numeric_bounds, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save  # import here to avoid circular dependency
+    from main import llm_call, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save  # import here to avoid circular dependency
     from pathlib import Path
     
     qtype = question_obj.get("type", "").lower()
     qid = question_obj.get("id", "unknown")
+    qtitle = question_obj.get("title", "")
+    qdesc = question_obj.get("description", "")
     
-    # Parse bounds for numeric questions
-    bounds = None
-    if "numeric" in qtype or "continuous" in qtype:
-        bounds = parse_numeric_bounds(question_obj, trace=trace)
+    # Build context string from facts
+    context_str = "Recent news:\n"
+    for fact in context_facts[:5]:  # cap at 5 to keep prompt short
+        fact_truncated = fact if len(fact) <= 200 else fact[:197] + "..."
+        context_str += f"- {fact_truncated}\n"
     
-    # Sample worlds
-    worlds = []
+    # Per-type schema and parsing
+    if qtype == "binary":
+        return _run_binary_worlds(qid, qtitle, qdesc, context_str, n_worlds, return_evidence, trace)
+    elif qtype == "multiple_choice":
+        options = question_obj.get("options", [])
+        return _run_multiple_choice_worlds(qid, qtitle, qdesc, context_str, options, n_worlds, return_evidence, trace)
+    elif qtype == "numeric":
+        return _run_numeric_worlds(qid, qtitle, qdesc, context_str, question_obj, n_worlds, return_evidence, trace)
+    else:
+        raise ValueError(f"Unsupported question type: {qtype}")
+
+
+def _run_binary_worlds(qid, qtitle, qdesc, context_str, n_worlds, return_evidence, trace):
+    """
+    Binary questions: Request {"answer": true|false}, compute probability as mean of booleans.
+    """
+    from main import llm_call, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save
+    from pathlib import Path
+    
+    # Build system message with strict schema
+    system_msg = """You are a superforecaster. Respond with ONLY JSON in this exact format:
+{"answer": true}
+or
+{"answer": false}
+
+No other keys, no markdown, no explanations. Just the JSON object."""
+    
+    # Build user message with question and facts
+    user_msg = f"""Question: {qtitle}
+
+{qdesc}
+
+{context_str}
+
+Based on your analysis, will this happen? Respond with ONLY JSON: {{"answer": true}} or {{"answer": false}}"""
+    
+    # Collect world results
+    answers = []
+    world_summaries = []
+    
     for i in range(n_worlds):
         try:
-            # Build prompt with token limit
-            prompt =  WORLD_PROMPT + f"\n\nContext (recent news):\n"
-            # Include top-k facts (k<=5) to reduce generic summaries, truncate to avoid token bloat
-            for fact in context_facts[:5]:  # cap at 5 to keep prompt short
-                # Truncate long facts to ~200 chars
-                fact_truncated = fact if len(fact) <= 200 else fact[:197] + "..."
-                prompt += f"- {fact_truncated}\n"
-            prompt += f"\nQuestion to consider: {question_obj['title']}\n"
-            
-            # For numeric questions, add bounds constraint to prompt
-            if bounds:
-                min_bound, max_bound = bounds
-                prompt += f"\nIMPORTANT: When providing numeric estimates, all values MUST be within the range [{min_bound}, {max_bound}].\n"
+            # Combine system and user messages into a single prompt
+            prompt = f"{system_msg}\n\n{user_msg}"
             
             # Save prompt to debug file if debug is enabled
             if OPENROUTER_DEBUG_ENABLED:
                 try:
                     CACHE_DIR.mkdir(exist_ok=True)
-                    prompt_file = CACHE_DIR / f"debug_world_q{qid}_{i}_prompt.txt"
+                    prompt_file = CACHE_DIR / f"debug_binary_world_q{qid}_{i}_prompt.txt"
                     with open(prompt_file, "w", encoding="utf-8") as f:
                         f.write(prompt)
-                    print(f"[MC DEBUG] Saved world {i} prompt: {prompt_file}", flush=True)
+                    print(f"[MC DEBUG] Saved binary world {i} prompt: {prompt_file}", flush=True)
                 except Exception as e:
                     print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
             
-            world = llm_call(prompt, max_tokens=800, temperature=0.7, trace=trace)
-            worlds.append(world)
-        except Exception as e:
-            print(f"[WARN] World {i+1} failed: {e}")
+            result = llm_call(prompt, max_tokens=50, temperature=0.7, trace=trace)
             
-            # Save error to debug file if debug is enabled
+            # Parse answer
+            answer = result.get("answer")
+            if isinstance(answer, bool):
+                answers.append(answer)
+                world_summaries.append(f"World {i+1}: {'YES' if answer else 'NO'}")
+            else:
+                print(f"[WARN] Binary world {i+1} returned non-boolean answer: {answer}", flush=True)
+                
+        except Exception as e:
+            print(f"[WARN] Binary world {i+1} failed: {e}", flush=True)
             if OPENROUTER_DEBUG_ENABLED:
                 try:
                     CACHE_DIR.mkdir(exist_ok=True)
-                    error_file = CACHE_DIR / f"debug_world_q{qid}_{i}_error.txt"
+                    error_file = CACHE_DIR / f"debug_binary_world_q{qid}_{i}_error.txt"
                     with open(error_file, "w", encoding="utf-8") as f:
-                        f.write(f"Error in world {i} generation:\n{str(e)}\n")
+                        f.write(f"Error in binary world {i} generation:\n{str(e)}\n")
                         import traceback
                         f.write(f"\nTraceback:\n{traceback.format_exc()}")
-                    print(f"[MC DEBUG] Saved world {i} error: {error_file}", flush=True)
+                    print(f"[MC DEBUG] Saved binary world {i} error: {error_file}", flush=True)
                 except Exception as save_err:
                     print(f"[ERROR] Failed to save world {i} error: {save_err}", flush=True)
     
-    if not worlds:
-        raise RuntimeError("No valid worlds generated")
+    if not answers:
+        raise RuntimeError("No valid binary worlds generated")
     
-    # Collect summaries
-    world_summaries = [w.get("summary", "") for w in worlds if "summary" in w]
+    # Compute probability as mean of booleans
+    p = sum(1 for a in answers if a) / len(answers)
     
-    # Save aggregate input diagnostics (before aggregation)
+    # Clamp to [0.01, 0.99]
+    p = max(0.01, min(0.99, p))
+    
+    result = {"p": p}
+    
+    # Save diagnostics
     if trace:
         try:
             aggregate_input = {
-                "n_worlds": len(worlds),
-                "worlds": worlds,
-                "world_summaries": world_summaries
+                "n_worlds": len(answers),
+                "answers": answers
             }
             _diag_save(trace, "20_aggregate_input", aggregate_input, redact=False)
-        except Exception as e:
-            print(f"[WARN] Failed to save aggregate input diagnostics: {e}", flush=True)
-    
-    # Aggregate forecasts per question type
-    result = {}
-    
-    if "binary" in qtype:
-        # For binary, we need a second pass: each world votes yes/no
-        # (simplified: assume 50% chance per world, or sample from world context)
-        # Here we do a simple heuristic: random coin flip weighted by sentiment
-        # In real impl, you'd ask LLM "does this world support the question?"
-        # For now, placeholder:
-        votes_yes = sum(1 for w in worlds if _world_supports_binary(w, question_obj))
-        p = votes_yes / len(worlds)
-        # Clamp
-        p = max(0.01, min(0.99, p))
-        result["p"] = p
-    
-    elif "multiple" in qtype or "mc" in qtype:
-        k = len(question_obj.get("options", []))
-        if k == 0:
-            raise ValueError("MC question has no options")
-        
-        # Each world votes for one option (simplified)
-        votes = [0] * k
-        for w in worlds:
-            choice = _world_choice_mc(w, question_obj)
-            if 0 <= choice < k:
-                votes[choice] += 1
-        
-        probs = [v / len(worlds) for v in votes]
-        # Normalize
-        total = sum(probs)
-        if total > 0:
-            probs = [p / total for p in probs]
-        else:
-            probs = [1.0 / k] * k  # uniform fallback
-        
-        result["probs"] = probs
-    
-    elif "numeric" in qtype or "continuous" in qtype:
-        # Each world gives a point estimate
-        samples = []
-        for w in worlds:
-            val = _world_numeric_estimate(w, question_obj, bounds)
-            if val is not None:
-                samples.append(val)
-        
-        if not samples:
-            raise ValueError("No numeric samples generated")
-        
-        samples.sort()
-        
-        # Build CDF on fixed grid using bounds
-        if bounds:
-            min_bound, max_bound = bounds
-            lo = min_bound
-            hi = max_bound
-        else:
-            lo = question_obj.get("min", min(samples))
-            hi = question_obj.get("max", max(samples))
-        
-        # Clamp samples to bounds if needed (safety)
-        samples = [max(lo, min(hi, s)) for s in samples]
-        samples.sort()
-        
-        grid = [lo + (hi - lo) * i / 100 for i in range(101)]
-        cdf = []
-        for x in grid:
-            cdf.append(sum(1 for s in samples if s <= x) / len(samples))
-        
-        result["grid"] = grid
-        result["cdf"] = cdf
-        result["p10"] = _percentile(samples, 0.10)
-        result["p50"] = _percentile(samples, 0.50)
-        result["p90"] = _percentile(samples, 0.90)
-        
-        # Validate bounds
-        if bounds:
-            min_bound, max_bound = bounds
-            grid_min = min(grid)
-            grid_max = max(grid)
-            
-            # Check if grid exceeds bounds (should not happen with our logic above)
-            if grid_min < min_bound or grid_max > max_bound:
-                print(f"[REJECT] numeric grid beyond bounds [{min_bound}, {max_bound}]: min={grid_min}, max={grid_max}")
-                # Already clamped samples, so grid should be ok now
-            
-            # Check percentiles
-            for pname, pval in [("p10", result["p10"]), ("p50", result["p50"]), ("p90", result["p90"])]:
-                if pval < min_bound or pval > max_bound:
-                    print(f"[REJECT] {pname}={pval} outside bounds [{min_bound}, {max_bound}]")
-    
-    # Save aggregate output diagnostics (after aggregation)
-    if trace:
-        try:
             _diag_save(trace, "21_aggregate_output", result, redact=False)
-            
-            # Check for previous aggregate output and create diff
-            import os
-            prev_file = os.path.join(trace.dir, "21_aggregate_output.json")
-            if os.path.exists(prev_file):
-                try:
-                    import json
-                    with open(prev_file, "r", encoding="utf-8") as f:
-                        prev_result = json.load(f)
-                    trace.diff("aggregate_output", prev_result, result)
-                except Exception as diff_err:
-                    print(f"[WARN] Failed to create aggregate diff: {diff_err}", flush=True)
         except Exception as e:
-            print(f"[WARN] Failed to save aggregate output diagnostics: {e}", flush=True)
+            print(f"[WARN] Failed to save aggregate diagnostics: {e}", flush=True)
     
     if return_evidence:
         result["world_summaries"] = world_summaries
     
     return result
 
-def _world_supports_binary(world: Dict, question_obj: Dict) -> bool:
-    """Heuristic: does this world support a YES answer? (placeholder)."""
-    # Real impl: parse world fields and match to question
-    # For now, 50/50 coin flip
-    import random
-    return random.random() > 0.5
 
-def _world_choice_mc(world: Dict, question_obj: Dict) -> int:
-    """Heuristic: which MC option does this world support? (placeholder)."""
-    import random
-    k = len(question_obj.get("options", []))
-    return random.randint(0, k - 1)
-
-def _world_numeric_estimate(world: Dict, question_obj: Dict, bounds=None) -> float:
-    """Heuristic: numeric estimate from world. (placeholder)."""
-    # Real impl: parse world, extract numeric signal
-    # For now, sample from uniform in question range
-    import random
+def _run_multiple_choice_worlds(qid, qtitle, qdesc, context_str, options, n_worlds, return_evidence, trace):
+    """
+    Multiple choice: Request {"scores": {"option1": score, ...}}, normalize to probabilities.
+    """
+    from main import llm_call, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save
+    from pathlib import Path
     
-    if bounds:
-        lo, hi = bounds
+    if not options:
+        raise ValueError("Multiple choice question has no options")
+    
+    # Extract option names - ensure consistent handling
+    option_names = []
+    for i, opt in enumerate(options):
+        if isinstance(opt, str):
+            option_names.append(opt)
+        elif isinstance(opt, dict):
+            name = opt.get("name", f"Option{i}")  # Use 0-indexed for consistency
+            option_names.append(name)
+        else:
+            option_names.append(f"Option{i}")
+    
+    # Sanitize option names to prevent prompt injection
+    def sanitize_option_name(name):
+        """Remove potentially problematic characters from option names."""
+        # Remove JSON control characters and newlines
+        sanitized = name.replace('"', '').replace("'", '').replace('\n', ' ').replace('\r', ' ')
+        # Truncate to reasonable length
+        return sanitized[:100]
+    
+    option_names = [sanitize_option_name(name) for name in option_names]
+    
+    # Build system message with strict schema
+    system_msg = f"""You are a superforecaster. Respond with ONLY JSON in this exact format:
+{{"scores": {{{", ".join(f'"{name}": <number>' for name in option_names)}}}}}
+
+Assign a score (0-100) to each option based on likelihood. Higher score = more likely.
+No other keys, no markdown, no explanations. Just the JSON object."""
+    
+    # Build user message with question and facts
+    options_str = "\n".join(f"- {name}" for name in option_names)
+    user_msg = f"""Question: {qtitle}
+
+{qdesc}
+
+Options:
+{options_str}
+
+{context_str}
+
+Based on your analysis, assign scores (0-100) to each option. Respond with ONLY JSON: {{"scores": {{...}}}}"""
+    
+    # Collect world results
+    world_scores = []
+    world_summaries = []
+    
+    for i in range(n_worlds):
+        try:
+            # Combine system and user messages into a single prompt
+            prompt = f"{system_msg}\n\n{user_msg}"
+            
+            # Save prompt to debug file if debug is enabled
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    prompt_file = CACHE_DIR / f"debug_mc_world_q{qid}_{i}_prompt.txt"
+                    with open(prompt_file, "w", encoding="utf-8") as f:
+                        f.write(prompt)
+                    print(f"[MC DEBUG] Saved MC world {i} prompt: {prompt_file}", flush=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
+            
+            result = llm_call(prompt, max_tokens=200, temperature=0.7, trace=trace)
+            
+            # Parse scores
+            scores_dict = result.get("scores", {})
+            if isinstance(scores_dict, dict):
+                # Extract scores in option order
+                scores = []
+                for name in option_names:
+                    score = scores_dict.get(name, 0)
+                    try:
+                        scores.append(float(score))
+                    except (ValueError, TypeError):
+                        scores.append(0.0)
+                
+                world_scores.append(scores)
+                
+                # Create summary
+                max_idx = scores.index(max(scores)) if scores else 0
+                world_summaries.append(f"World {i+1}: {option_names[max_idx]} (score: {scores[max_idx]:.1f})")
+            else:
+                print(f"[WARN] MC world {i+1} returned invalid scores: {scores_dict}", flush=True)
+                
+        except Exception as e:
+            print(f"[WARN] MC world {i+1} failed: {e}", flush=True)
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    error_file = CACHE_DIR / f"debug_mc_world_q{qid}_{i}_error.txt"
+                    with open(error_file, "w", encoding="utf-8") as f:
+                        f.write(f"Error in MC world {i} generation:\n{str(e)}\n")
+                        import traceback
+                        f.write(f"\nTraceback:\n{traceback.format_exc()}")
+                    print(f"[MC DEBUG] Saved MC world {i} error: {error_file}", flush=True)
+                except Exception as save_err:
+                    print(f"[ERROR] Failed to save world {i} error: {save_err}", flush=True)
+    
+    if not world_scores:
+        raise RuntimeError("No valid MC worlds generated")
+    
+    # Average scores across worlds
+    k = len(option_names)
+    avg_scores = [0.0] * k
+    for scores in world_scores:
+        for i in range(k):
+            avg_scores[i] += scores[i]
+    avg_scores = [s / len(world_scores) for s in avg_scores]
+    
+    # Normalize to probabilities
+    total_score = sum(avg_scores)
+    if total_score > 0:
+        probs = [s / total_score for s in avg_scores]
     else:
-        lo = question_obj.get("min", 0)
-        hi = question_obj.get("max", 100)
+        # Fallback to uniform if all scores are 0
+        probs = [1.0 / k] * k
     
-    return random.uniform(lo, hi)
+    result = {"probs": probs}
+    
+    # Save diagnostics
+    if trace:
+        try:
+            aggregate_input = {
+                "n_worlds": len(world_scores),
+                "world_scores": world_scores,
+                "option_names": option_names
+            }
+            _diag_save(trace, "20_aggregate_input", aggregate_input, redact=False)
+            _diag_save(trace, "21_aggregate_output", result, redact=False)
+        except Exception as e:
+            print(f"[WARN] Failed to save aggregate diagnostics: {e}", flush=True)
+    
+    if return_evidence:
+        result["world_summaries"] = world_summaries
+    
+    return result
+
+
+def _run_numeric_worlds(qid, qtitle, qdesc, context_str, question_obj, n_worlds, return_evidence, trace):
+    """
+    Numeric questions: Request {"value": number}, average values directly without normalization.
+    """
+    from main import llm_call, OPENROUTER_DEBUG_ENABLED, CACHE_DIR, _diag_save
+    from pathlib import Path
+    
+    # Build system message with strict schema
+    system_msg = """You are a superforecaster. Respond with ONLY JSON in this exact format:
+{"value": <number>}
+
+Provide your best point estimate as a single numeric value.
+No other keys, no markdown, no explanations. Just the JSON object."""
+    
+    # Build user message with question and facts
+    user_msg = f"""Question: {qtitle}
+
+{qdesc}
+
+{context_str}
+
+Based on your analysis, what is your best point estimate? Respond with ONLY JSON: {{"value": <number>}}"""
+    
+    # Collect world results
+    values = []
+    world_summaries = []
+    
+    for i in range(n_worlds):
+        try:
+            # Combine system and user messages into a single prompt
+            prompt = f"{system_msg}\n\n{user_msg}"
+            
+            # Save prompt to debug file if debug is enabled
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    prompt_file = CACHE_DIR / f"debug_numeric_world_q{qid}_{i}_prompt.txt"
+                    with open(prompt_file, "w", encoding="utf-8") as f:
+                        f.write(prompt)
+                    print(f"[MC DEBUG] Saved numeric world {i} prompt: {prompt_file}", flush=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
+            
+            result = llm_call(prompt, max_tokens=50, temperature=0.7, trace=trace)
+            
+            # Parse value
+            value = result.get("value")
+            try:
+                val = float(value)
+                values.append(val)
+                world_summaries.append(f"World {i+1}: {val}")
+            except (ValueError, TypeError):
+                print(f"[WARN] Numeric world {i+1} returned non-numeric value: {value}", flush=True)
+                
+        except Exception as e:
+            print(f"[WARN] Numeric world {i+1} failed: {e}", flush=True)
+            if OPENROUTER_DEBUG_ENABLED:
+                try:
+                    CACHE_DIR.mkdir(exist_ok=True)
+                    error_file = CACHE_DIR / f"debug_numeric_world_q{qid}_{i}_error.txt"
+                    with open(error_file, "w", encoding="utf-8") as f:
+                        f.write(f"Error in numeric world {i} generation:\n{str(e)}\n")
+                        import traceback
+                        f.write(f"\nTraceback:\n{traceback.format_exc()}")
+                    print(f"[MC DEBUG] Saved numeric world {i} error: {error_file}", flush=True)
+                except Exception as save_err:
+                    print(f"[ERROR] Failed to save world {i} error: {save_err}", flush=True)
+    
+    if not values:
+        raise RuntimeError("No valid numeric worlds generated")
+    
+    # Average values directly (no normalization/clamping)
+    # Infer grid bounds from sampled values
+    values.sort()
+    lo = min(values)
+    hi = max(values)
+    
+    # Add small padding to ensure all values are within grid
+    range_padding = (hi - lo) * 0.05 if hi > lo else 1.0
+    lo = lo - range_padding
+    hi = hi + range_padding
+    
+    # Create grid
+    grid = [lo + (hi - lo) * i / 100 for i in range(101)]
+    
+    # Compute CDF
+    cdf = []
+    for x in grid:
+        cdf.append(sum(1 for v in values if v <= x) / len(values))
+    
+    # Compute percentiles
+    p10 = _percentile(values, 0.10)
+    p50 = _percentile(values, 0.50)
+    p90 = _percentile(values, 0.90)
+    
+    result = {
+        "grid": grid,
+        "cdf": cdf,
+        "p10": p10,
+        "p50": p50,
+        "p90": p90
+    }
+    
+    # Save diagnostics
+    if trace:
+        try:
+            aggregate_input = {
+                "n_worlds": len(values),
+                "values": values,
+                "sorted_values": sorted(values)
+            }
+            _diag_save(trace, "20_aggregate_input", aggregate_input, redact=False)
+            _diag_save(trace, "21_aggregate_output", result, redact=False)
+        except Exception as e:
+            print(f"[WARN] Failed to save aggregate diagnostics: {e}", flush=True)
+    
+    if return_evidence:
+        result["world_summaries"] = world_summaries
+    
+    return result
+
 
 def _percentile(sorted_values: List[float], p: float) -> float:
     """Return p-th percentile from sorted list."""
@@ -280,6 +455,7 @@ def _percentile(sorted_values: List[float], p: float) -> float:
     idx = int(p * len(sorted_values))
     idx = max(0, min(idx, len(sorted_values) - 1))
     return sorted_values[idx]
+
 
 def collect_world_summaries(worlds: List[Dict]) -> List[str]:
     """Extract summary strings from world dicts (helper)."""
