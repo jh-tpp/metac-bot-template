@@ -79,7 +79,7 @@ METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025
 METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
 
 # ========== Diagnostics Enable Flag ==========
-DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "true")
+DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "false")
 DIAGNOSTICS_USE = _parse_bool_flag(DIAGNOSTICS_ENABLED, default=True)
 DIAGNOSTICS_TRACE_DIR = os.environ.get("DIAGNOSTICS_TRACE_DIR", "cache/trace")
 
