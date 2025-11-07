@@ -168,6 +168,11 @@ def _parse_world_output(qtype: str, raw_content_dict: Dict, options: List = None
             return None, None
         
         elif qtype == "multiple_choice":
+            # Early validation for empty options
+            if not options:
+                print(f"[WARN] MC parse failed: no options provided", flush=True)
+                return None, None
+            
             # Try {"scores": {"Opt1": num, ...}}
             if "scores" in raw_content_dict:
                 scores_dict = raw_content_dict["scores"]
@@ -198,8 +203,8 @@ def _parse_world_output(qtype: str, raw_content_dict: Dict, options: List = None
                 except (ValueError, TypeError):
                     scores.append(0.0)
             
-            if not option_names or all(s == 0 for s in scores):
-                print(f"[WARN] MC parse got all zeros or no options: {scores_dict}", flush=True)
+            if all(s == 0 for s in scores):
+                print(f"[WARN] MC parse got all zeros: {scores_dict}", flush=True)
                 return None, None
             
             max_idx = scores.index(max(scores))
@@ -252,9 +257,17 @@ def _aggregate_multiple_choice(world_results: List[List[float]], options: List) 
     if not world_results:
         raise RuntimeError("No valid MC worlds")
     
+    if not options:
+        raise RuntimeError("No options provided for MC aggregation")
+    
     k = len(world_results[0])
+    if k == 0:
+        raise RuntimeError("Empty world results in MC aggregation")
+    
     avg_scores = [0.0] * k
     for scores in world_results:
+        if len(scores) != k:
+            raise RuntimeError(f"Inconsistent world result lengths: expected {k}, got {len(scores)}")
         for i in range(k):
             avg_scores[i] += scores[i]
     avg_scores = [s / len(world_results) for s in avg_scores]
