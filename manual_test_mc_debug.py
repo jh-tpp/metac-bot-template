@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 # Set up test environment
-os.environ['OPENROUTER_DEBUG'] = 'true'
+os.environ['OPENROUTER_DEBUG'] = 'false'
 os.environ['OPENROUTER_API_KEY'] = 'test-key'
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
