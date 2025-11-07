@@ -253,6 +253,138 @@ def _normalize_question_type(raw_type):
     normalized_key = raw_type.lower().replace("-", "").replace("_", "")
     return type_mapping.get(normalized_key, "")
 
+def _classify_question(q):
+    """
+    Classify question type and extract options using simplified, robust logic.
+    Replaces _infer_qtype_and_fields with more reliable type detection.
+    
+    Args:
+        q: Question dict from Metaculus API2 (may be nested under 'question' key)
+    
+    Returns:
+        Tuple (qtype, options_list) where:
+        - qtype: str in {"binary", "numeric", "multiple_choice", None}
+        - options_list: list[str] of option names for multiple_choice, empty list otherwise
+    """
+    # Pivot into core question object
+    core = _get_core_question(q)
+    qid = core.get("id") or q.get("id", "?")
+    
+    # Get possibilities/possibility from core (defensive for both singular/plural)
+    poss = core.get("possibilities") or core.get("possibility") or {}
+    
+    # Extract type from possibilities.type or core.type
+    ptype = ""
+    if isinstance(poss, dict):
+        ptype = (poss.get("type") or "").strip().lower()
+    elif isinstance(poss, list) and len(poss) > 0 and isinstance(poss[0], dict):
+        ptype = (poss[0].get("type") or "").strip().lower()
+    
+    # Fallback to core.type if ptype not found
+    if not ptype:
+        ptype = (core.get("type") or "").strip().lower()
+    
+    # Determine qtype using simplified rules (per requirements)
+    qtype = None
+    options_list = []
+    
+    # A) Simplified type inference
+    # Rule 1: Binary types
+    if ptype in ["binary", "bool", "boolean"]:
+        qtype = "binary"
+    
+    # Rule 2: Multiple choice types OR non-empty core.options
+    elif ptype in ["multiple_choice", "discrete"]:
+        qtype = "multiple_choice"
+        
+        # Extract options from poss.outcomes or core.options
+        # Try poss.outcomes first
+        if isinstance(poss, dict) and "outcomes" in poss:
+            outcomes = poss["outcomes"]
+            if isinstance(outcomes, list):
+                for outcome in outcomes:
+                    if isinstance(outcome, dict):
+                        name = outcome.get("name") or outcome.get("label") or ""
+                        if name:
+                            options_list.append(name)
+        
+        # Fallback to core.options (even if poss.outcomes is empty/missing)
+        if not options_list and "options" in core:
+            options_data = core["options"]
+            if isinstance(options_data, list):
+                for opt in options_data:
+                    if isinstance(opt, dict):
+                        name = opt.get("name") or opt.get("label") or opt.get("title") or ""
+                        if name:
+                            options_list.append(name)
+                    elif isinstance(opt, str):
+                        options_list.append(opt)
+    
+    # Rule 3: Numeric types
+    elif ptype in ["numeric", "numerical", "continuous", "date"]:
+        qtype = "numeric"
+    
+    # Rule 4: Fallback - try to detect from structure
+    else:
+        # Check if core.options is a non-empty list
+        if "options" in core:
+            options_data = core.get("options", [])
+            if isinstance(options_data, list) and len(options_data) > 0:
+                qtype = "multiple_choice"
+                for opt in options_data:
+                    if isinstance(opt, dict):
+                        name = opt.get("name") or opt.get("label") or opt.get("title") or ""
+                        if name:
+                            options_list.append(name)
+                    elif isinstance(opt, str):
+                        options_list.append(opt)
+        
+        # Check for numeric indicators
+        elif isinstance(poss, dict):
+            has_numeric_indicators = (
+                "open_upper_bound" in poss or 
+                "open_lower_bound" in poss or 
+                "unit" in poss or
+                "range" in poss or
+                "min" in poss or
+                "max" in poss
+            )
+            if has_numeric_indicators:
+                qtype = "numeric"
+        
+        # Check in core for numeric indicators
+        if qtype is None:
+            has_numeric_indicators = (
+                "open_upper_bound" in core or 
+                "open_lower_bound" in core or 
+                "unit" in core
+            )
+            if has_numeric_indicators:
+                qtype = "numeric"
+    
+    # Logging improvements (per requirements)
+    if qtype:
+        # Extract source information for logging
+        poss_type = poss.get("type", "") if isinstance(poss, dict) else ""
+        core_type = core.get("type", "")
+        options_len = len(options_list) if qtype == "multiple_choice" else 0
+        
+        source_info = {
+            "core.type": core_type if core_type else None,
+            "poss.type": poss_type if poss_type else None,
+            "options_len": options_len if qtype == "multiple_choice" else None
+        }
+        
+        print(f"[TYPE DETECT] Q{qid} source={source_info} final={qtype}", flush=True)
+    else:
+        # Log reason for unknown classification
+        reason = "missing type and no options"
+        if ptype:
+            reason = f"unmapped type '{ptype}' with no fallback indicators"
+        print(f"[TYPE UNKNOWN] Q{qid}: {reason}", flush=True)
+    
+    return (qtype, options_list)
+
 def _normalize_question_object(raw):
     """
     Normalize a question object from Metaculus API v2.
@@ -717,35 +849,17 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 except Exception as e:
                     print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
             
-            # Pivot into core question object
-            core = _get_core_question(q)
-            
-            # Minimal type determination: core.possibilities.type if present, else core.type
-            poss = core.get("possibilities") or core.get("possibility") or {}
-            qtype = ""
-            
-            # Try possibilities.type first
-            if isinstance(poss, dict):
-                ptype = (poss.get("type") or "").strip().lower()
-                if ptype:
-                    qtype = _normalize_question_type(ptype)
-            
-            # Fallback to core.type
-            if not qtype:
-                core_type = (core.get("type") or "").strip().lower()
-                if core_type:
-                    qtype = _normalize_question_type(core_type)
+            # Use new _classify_question to get type and options
+            qtype, options_list = _classify_question(q)
             
             # Skip if type is unknown/unmappable
-            if not qtype:
-                poss_type = poss.get("type", "") if isinstance(poss, dict) else ""
-                raw_type = core.get("type", "")
-                type_source = poss_type if poss_type else (raw_type if raw_type else "unknown")
-                print(f"[SKIP] Unsupported question type for Q{qid}: '{type_source}'")
+            if qtype is None:
+                print(f"[SKIP] Unknown/unsupported question type for Q{qid}")
                 skipped_count += 1
                 continue
             
             # Extract title and description from core
+            core = _get_core_question(q)
             title = core.get("title") or q.get("title") or ""
             description = core.get("description") or q.get("description") or ""
             
@@ -758,33 +872,9 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
                 "url": f"https://www.metaculus.com/questions/{qid}/"
             }
             
-            # For multiple_choice, extract options only
+            # For multiple_choice, use options from classification
             if qtype == "multiple_choice":
-                options = []
-                
-                # Try poss.outcomes[].name|label
-                if isinstance(poss, dict) and "outcomes" in poss:
-                    outcomes = poss["outcomes"]
-                    if isinstance(outcomes, list):
-                        for outcome in outcomes:
-                            if isinstance(outcome, dict):
-                                name = outcome.get("name") or outcome.get("label") or ""
-                                if name:
-                                    options.append(name)
-                
-                # Fallback to core.options[].name
-                if not options and "options" in core:
-                    options_data = core["options"]
-                    if isinstance(options_data, list):
-                        for opt in options_data:
-                            if isinstance(opt, dict):
-                                name = opt.get("name") or opt.get("label") or opt.get("title") or ""
-                                if name:
-                                    options.append(name)
-                            elif isinstance(opt, str):
-                                options.append(opt)
-                
-                normalized["options"] = options
+                normalized["options"] = options_list
             
             # Save normalized question with raw for trace (keep raw in normalized for diagnostics)
             if trace:
@@ -1882,9 +1972,10 @@ def run_live_test():
         if not qid:
             continue
         
-        qtype, extra = _infer_qtype_and_fields(q)
+        # Use new _classify_question instead of _infer_qtype_and_fields
+        qtype, options_list = _classify_question(q)
         
-        if qtype == "unknown":
+        if qtype is None:
             print(f"[SKIP] Unknown type for Q{qid} - check debug artifacts", flush=True)
             continue
         
@@ -1904,14 +1995,30 @@ def run_live_test():
         }
         
         if qtype == "multiple_choice":
-            options = extra.get("options", [])
-            normalized["options"] = [{"name": name} for name in options]
+            normalized["options"] = [{"name": name} for name in options_list]
             print(f"[INFO] Q{qid} options: {[opt['name'] for opt in normalized['options']]}", flush=True)
         else:
             normalized["options"] = []
         
         if qtype == "numeric":
-            numeric_bounds = extra.get("numeric_bounds", {})
+            # Extract numeric bounds from possibilities or core
+            poss = core.get("possibilities") or core.get("possibility") or {}
+            numeric_bounds = {}
+            
+            if isinstance(poss, dict):
+                # Try poss.range
+                if "range" in poss:
+                    poss_range = poss["range"]
+                    if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                        numeric_bounds["min"] = poss_range[0]
+                        numeric_bounds["max"] = poss_range[1]
+                # Try poss.min/max
+                if not numeric_bounds:
+                    if "min" in poss:
+                        numeric_bounds["min"] = poss["min"]
+                    if "max" in poss:
+                        numeric_bounds["max"] = poss["max"]
+            
             if "min" in numeric_bounds:
                 try:
                     normalized["min"] = float(numeric_bounds["min"])
@@ -2026,9 +2133,10 @@ def run_submit_smoke_test(test_qid, publish=False):
     
     # Normalize question
     qid = q.get("id")
-    qtype, extra = _infer_qtype_and_fields(q)
+    # Use new _classify_question instead of _infer_qtype_and_fields
+    qtype, options_list = _classify_question(q)
     
-    if qtype == "unknown":
+    if qtype is None:
         print(f"[ERROR] Unknown question type for Q{qid}. Aborting.", flush=True)
         return
     
@@ -2048,13 +2156,29 @@ def run_submit_smoke_test(test_qid, publish=False):
     }
     
     if qtype == "multiple_choice":
-        options = extra.get("options", [])
-        normalized["options"] = [{"name": name} for name in options]
+        normalized["options"] = [{"name": name} for name in options_list]
     else:
         normalized["options"] = []
     
     if qtype == "numeric":
-        numeric_bounds = extra.get("numeric_bounds", {})
+        # Extract numeric bounds from possibilities or core
+        poss = core.get("possibilities") or core.get("possibility") or {}
+        numeric_bounds = {}
+        
+        if isinstance(poss, dict):
+            # Try poss.range
+            if "range" in poss:
+                poss_range = poss["range"]
+                if isinstance(poss_range, (list, tuple)) and len(poss_range) >= 2:
+                    numeric_bounds["min"] = poss_range[0]
+                    numeric_bounds["max"] = poss_range[1]
+            # Try poss.min/max
+            if not numeric_bounds:
+                if "min" in poss:
+                    numeric_bounds["min"] = poss["min"]
+                if "max" in poss:
+                    numeric_bounds["max"] = poss["max"]
+        
         if "min" in numeric_bounds:
             try:
                 normalized["min"] = float(numeric_bounds["min"])
