@@ -189,8 +189,26 @@ def _run_multiple_choice_worlds(qid, qtitle, qdesc, context_str, options, n_worl
     if not options:
         raise ValueError("Multiple choice question has no options")
     
-    # Extract option names
-    option_names = [opt if isinstance(opt, str) else opt.get("name", f"Option {i+1}") for i, opt in enumerate(options)]
+    # Extract option names - ensure consistent handling
+    option_names = []
+    for i, opt in enumerate(options):
+        if isinstance(opt, str):
+            option_names.append(opt)
+        elif isinstance(opt, dict):
+            name = opt.get("name", f"Option{i}")  # Use 0-indexed for consistency
+            option_names.append(name)
+        else:
+            option_names.append(f"Option{i}")
+    
+    # Sanitize option names to prevent prompt injection
+    def sanitize_option_name(name):
+        """Remove potentially problematic characters from option names."""
+        # Remove JSON control characters and newlines
+        sanitized = name.replace('"', '').replace("'", '').replace('\n', ' ').replace('\r', ' ')
+        # Truncate to reasonable length
+        return sanitized[:100]
+    
+    option_names = [sanitize_option_name(name) for name in option_names]
     
     # Build system message with strict schema
     system_msg = f"""You are a superforecaster. Respond with ONLY JSON in this exact format:
