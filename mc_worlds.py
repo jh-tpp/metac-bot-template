@@ -5,17 +5,18 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 # Simplified WORLD_PROMPT without intrusive schema blocks
-WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst making a forecast.
+WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. You are generating ONE plausible sample of a future "world" consistent with the metadata and question below. Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
-Use Tetlockian forecasting discipline:
-- Start with the outside view and base rates
-- Consider alternative hypotheses and common biases
-- Set explicit assumptions internally
-- Be conservative under uncertainty
+Superforecaster discipline:
+- Tetlockian technique: start with the outside view and base rates; consider alt. hypotheses and common biases; set explicit assumptions internally (do not output them).
+- Coherence: outcomes must be mutually consistent, causally linked to drivers in the summary.
+- Causal model: before filling JSON, internally build a causal model that ties drivers → outcomes over the same world.
+- Be conservative under uncertainty; keep all outputs consistent.
+- Output PURE JSON only (no prose, no code fences).
 
-Analyze the question and facts below, then provide your forecast."""
+Analyze the question and facts below, then provide your randomly sampled scenario."""
 
-def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = False, trace=None) -> Dict[str, Any]:
+def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 30, return_evidence: bool = True, trace=None) -> Dict[str, Any]:
     """
     Run Monte-Carlo sampling with simplified world prompt construction.
     
