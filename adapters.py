@@ -79,7 +79,7 @@ def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
     """
     from main import _diag_save
     
-    url = f"https://www.metaculus.com/api/questions/{question_id}/forecast/"
+    url = f"https://www.metaculus.com/api2/questions/{question_id}/forecast/"
     headers = {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json"
