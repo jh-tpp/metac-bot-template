@@ -4,6 +4,9 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any
 
+# Read WORLD_MAX_TOKENS from environment (default 700)
+WORLD_MAX_TOKENS = int(os.getenv("WORLD_MAX_TOKENS", "700"))
+
 # Simplified WORLD_PROMPT without intrusive schema blocks
 WORLD_PROMPT = """You are a geopolitical and macroeconomic analyst. You are generating ONE plausible sample of a future "world" consistent with the metadata and question below. Return exactly one JSON object. No markdown, no comments, no trailing commas.
 
@@ -94,7 +97,7 @@ def run_mc_worlds(question_obj: Dict, context_facts: List[str], n_worlds: int = 
                     print(f"[ERROR] Failed to save world {i} prompt: {e}", flush=True)
             
             # Call LLM
-            result = llm_call(full_prompt, max_tokens=200, temperature=0.7, trace=trace)
+            result = llm_call(full_prompt, max_tokens=WORLD_MAX_TOKENS, temperature=0.7, trace=trace)
             
             # Parse output
             parsed, summary = _parse_world_output(qtype, result, options)
