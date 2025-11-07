@@ -260,6 +260,7 @@ def _aggregate_multiple_choice(world_results: List[List[float]], options: List) 
     if not options:
         raise RuntimeError("No options provided for MC aggregation")
     
+    # Safe to access world_results[0] after validation above
     k = len(world_results[0])
     if k == 0:
         raise RuntimeError("Empty world results in MC aggregation")
@@ -320,12 +321,31 @@ def _aggregate_numeric(world_results: List[float]) -> Dict:
 
 
 def _percentile(sorted_values: List[float], p: float) -> float:
-    """Return p-th percentile from sorted list."""
+    """
+    Return p-th percentile from sorted list using linear interpolation.
+    
+    Args:
+        sorted_values: Sorted list of numeric values
+        p: Percentile (0.0 to 1.0)
+    
+    Returns:
+        Interpolated percentile value
+    """
     if not sorted_values:
         return 0.0
-    idx = int(p * len(sorted_values))
-    idx = max(0, min(idx, len(sorted_values) - 1))
-    return sorted_values[idx]
+    
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    
+    # Use linear interpolation
+    pos = p * (n - 1)
+    lower_idx = int(pos)
+    upper_idx = min(lower_idx + 1, n - 1)
+    
+    # Interpolate between adjacent values
+    weight = pos - lower_idx
+    return sorted_values[lower_idx] * (1 - weight) + sorted_values[upper_idx] * weight
 
 
 def collect_world_summaries(worlds: List[Dict]) -> List[str]:
