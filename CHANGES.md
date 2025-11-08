@@ -1,6 +1,67 @@
 # Changes History
 
-## Restore Original Forecast and Comment Submission Logic (Current PR)
+## Hardcode Fall 2025 AIB Tournament (Current PR)
+
+### Summary
+This PR enforces the use of the Fall 2025 AI Benchmarking tournament (`fall-aib-2025`) by hardcoding the tournament identifier throughout the codebase. This prevents accidental environment variable overrides that could cause incorrect tournament IDs (e.g., 3512) to be used in production.
+
+### Key Changes
+
+**1. Tournament Hardcoding**
+- **Before**: Tournament could be overridden via environment variables:
+  - `METACULUS_PROJECT_ID`
+  - `METACULUS_PROJECT_SLUG`
+  - `METACULUS_CONTEST_SLUG`
+  - `FALL_2025_AI_BENCHMARKING_ID`
+- **After**: Tournament is hardcoded to `"fall-aib-2025"` in both `main.py` and `metaculus_posts.py`
+  - All tournament-related environment variables removed
+  - Function parameters for tournament selection ignored (kept for backward compatibility)
+  - No way to override the tournament in production code paths
+
+**2. Configuration Logging**
+- Added explicit log message: `[CONFIG] Using hardcoded tournament: fall-aib-2025`
+- Appears in `tournament_dryrun()` and `run_tournament()` modes
+- Makes it clear in CI output which tournament is being used
+
+**3. Documentation**
+- Added comprehensive comments in `metaculus_posts.py` explaining rationale
+- Updated function docstrings to indicate parameters are ignored
+- All tournament functions clearly document hardcoded behavior
+
+### Files Modified
+- `metaculus_posts.py`:
+  - Added documentation explaining hardcoding rationale
+  - Modified `list_posts_from_tournament()` to ignore `tournament_id` parameter
+  - Modified `get_open_question_ids_from_tournament()` to ignore `tournament_id` parameter
+  
+- `main.py`:
+  - Removed environment variable constants: `METACULUS_PROJECT_ID`, `METACULUS_PROJECT_SLUG`, `METACULUS_CONTEST_SLUG`, `FALL_2025_AI_BENCHMARKING_ID`
+  - Updated `list_posts_from_tournament()` to ignore `tournament_id` and use hardcoded slug
+  - Updated `get_open_question_ids_from_tournament()` to ignore `tournament_id`
+  - Updated `fetch_tournament_questions()` to ignore all parameters
+  - Modified `tournament_dryrun()` and `run_tournament()` to log config message
+  
+- `test_integration_tournament.py`:
+  - Updated to verify hardcoded tournament slug
+  - Added verification that tournament parameters are ignored
+  - All tests passing ✓
+
+### Testing
+All tests pass:
+- ✓ `test_integration_tournament.py`: Verifies hardcoded tournament behavior
+- ✓ Tournament slug correctly set to `fall-aib-2025`
+- ✓ All function parameters properly ignored
+- ✓ Configuration log message appears correctly
+
+### Benefits
+1. **Stability**: Prevents accidental tournament misconfiguration
+2. **Security**: No risk of environment variable injection
+3. **Clarity**: Explicit logging shows which tournament is being used
+4. **Simplicity**: One less configuration dimension to worry about
+
+---
+
+## Restore Original Forecast and Comment Submission Logic
 
 ### Summary
 This PR restores the forecast and comment submission logic to match the ORIGINAL template approach from `main_with_no_framework.py`, using `/api/` endpoints (not `/api2/`) with the original payload format and separate comment submission.

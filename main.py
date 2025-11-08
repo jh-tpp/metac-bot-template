@@ -40,6 +40,9 @@ METACULUS_TOKEN = os.environ.get("METACULUS_TOKEN", "")
 ASKNEWS_CLIENT_ID = os.environ.get("ASKNEWS_CLIENT_ID", "")
 ASKNEWS_SECRET = os.environ.get("ASKNEWS_SECRET", "")
 
+# State directory for workflow artifacts
+AIB_STATE_DIR = Path(".aib-state")
+
 # ========== AskNews Enable/Disable Flag ==========
 def _parse_bool_flag(val, default=False):
     """
@@ -78,17 +81,6 @@ OPENROUTER_DEBUG_ENABLED = _parse_bool_flag(OPENROUTER_DEBUG, default=False)
 # ========== OpenRouter Reasoning Disable Flag ==========
 OPENROUTER_DISABLE_REASONING = os.environ.get("OPENROUTER_DISABLE_REASONING", "false")
 OPENROUTER_DISABLE_REASONING_ENABLED = _parse_bool_flag(OPENROUTER_DISABLE_REASONING, default=False)
-
-# Project-based tournament targeting (AIB Fall 2025)
-METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
-METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
-METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
-
-# Fall 2025 AI Benchmarking tournament ID (for /api/posts/ endpoint)
-FALL_2025_AI_BENCHMARKING_ID = int(os.environ.get("FALL_2025_AI_BENCHMARKING_ID", "3512"))
-
-# State directory for workflow artifacts
-AIB_STATE_DIR = Path(".aib-state")
 
 # ========== State Management Helpers ==========
 def _ensure_state_dir():
@@ -240,16 +232,19 @@ def list_posts_from_tournament(tournament_id=None, offset=0, count=50):
     """
     Fetch posts from a Metaculus tournament using /api/posts/ endpoint.
     
+    IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    The tournament_id parameter is IGNORED and exists only for backward compatibility.
+    
     Args:
-        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
+        tournament_id: IGNORED - kept for backward compatibility only
         offset: Pagination offset (default 0)
         count: Number of posts to fetch (default 50, max 100)
     
     Returns:
         dict with 'results' list of posts, or None on failure
     """
-    if tournament_id is None:
-        tournament_id = FALL_2025_AI_BENCHMARKING_ID
+    # Always use hardcoded tournament - ignore parameter
+    actual_tournament = FALL_2025_AIB_TOURNAMENT
     
     url = "https://www.metaculus.com/api/posts/"
     params = {
@@ -257,13 +252,13 @@ def list_posts_from_tournament(tournament_id=None, offset=0, count=50):
         "offset": offset,
         "order_by": "-hotness",
         "forecast_type": "binary,multiple_choice,numeric,discrete",
-        "tournaments": str(tournament_id),
+        "tournaments": str(actual_tournament),
         "statuses": "open",
         "include_description": "true"
     }
     
     try:
-        print(f"[INFO] Fetching posts from tournament {tournament_id} (offset={offset}, count={count})")
+        print(f"[INFO] Fetching posts from tournament {actual_tournament} (offset={offset}, count={count})")
         
         # HTTP logging: log request
         print_http_request(
@@ -290,7 +285,7 @@ def list_posts_from_tournament(tournament_id=None, offset=0, count=50):
         save_http_artifacts("metaculus_posts_list", request_artifact, response_artifact)
         
         data = resp.json()
-        print(f"[INFO] Fetched {len(data.get('results', []))} posts from tournament {tournament_id}")
+        print(f"[INFO] Fetched {len(data.get('results', []))} posts from tournament {actual_tournament}")
         
         return data
         
@@ -311,21 +306,24 @@ def get_open_question_ids_from_tournament(tournament_id=None):
     """
     Get list of (question_id, post_id) tuples for open questions in a tournament.
     
+    IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    The tournament_id parameter is IGNORED and exists only for backward compatibility.
+    
     Args:
-        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
+        tournament_id: IGNORED - kept for backward compatibility only
     
     Returns:
-        List of (question_id, post_id) tuples
+        List of (question_id, post_id) tuples from Fall 2025 AIB tournament
     """
-    if tournament_id is None:
-        tournament_id = FALL_2025_AI_BENCHMARKING_ID
+    # Always use hardcoded tournament - ignore parameter
+    actual_tournament = FALL_2025_AIB_TOURNAMENT
     
     all_pairs = []
     offset = 0
     count = 50
     
     while True:
-        data = list_posts_from_tournament(tournament_id=tournament_id, offset=offset, count=count)
+        data = list_posts_from_tournament(offset=offset, count=count)
         if not data:
             break
         
@@ -354,7 +352,7 @@ def get_open_question_ids_from_tournament(tournament_id=None):
             break
         offset += count
     
-    print(f"[INFO] Found {len(all_pairs)} open questions in tournament {tournament_id}")
+    print(f"[INFO] Found {len(all_pairs)} open questions in tournament {actual_tournament}")
     return all_pairs
 
 
@@ -894,19 +892,22 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
     """
     Fetch open questions from a Metaculus tournament using /api/posts/ endpoint.
     
+    IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    All parameters are IGNORED and exist only for backward compatibility.
+    
     Args:
-        contest_slug: Unused (kept for backwards compatibility)
-        project_id: Unused (kept for backwards compatibility)
-        project_slug: Unused (kept for backwards compatibility)
-        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
+        contest_slug: IGNORED - kept for backwards compatibility
+        project_id: IGNORED - kept for backwards compatibility
+        project_slug: IGNORED - kept for backwards compatibility
+        tournament_id: IGNORED - kept for backwards compatibility
     
     Returns:
         List of question dicts normalized for pipeline, with post_id included
     """
-    if tournament_id is None:
-        tournament_id = FALL_2025_AI_BENCHMARKING_ID
+    # Always use hardcoded tournament - ignore all parameters
+    actual_tournament = FALL_2025_AIB_TOURNAMENT
     
-    print(f"[INFO] Fetching tournament questions from tournament {tournament_id} using /api/posts/")
+    print(f"[INFO] Fetching tournament questions from tournament {actual_tournament} using /api/posts/")
     
     # Fetch all posts from tournament
     all_posts = []
@@ -914,7 +915,7 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
     count = 50
     
     while True:
-        data = list_posts_from_tournament(tournament_id=tournament_id, offset=offset, count=count)
+        data = list_posts_from_tournament(offset=offset, count=count)
         if not data:
             break
         
@@ -929,7 +930,7 @@ def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=
             break
         offset += count
     
-    print(f"[INFO] Fetched {len(all_posts)} posts from tournament {tournament_id}")
+    print(f"[INFO] Fetched {len(all_posts)} posts from tournament {actual_tournament}")
     
     # Extract questions from posts
     questions = []
@@ -2423,21 +2424,29 @@ def run_test_mode():
     print("\n[TEST MODE] Complete. Artifacts: mc_results.json, mc_reasons.txt")
 
 # ========== Tournament Modes ==========
-def tournament_dryrun(tournament_slug: str = FALL_2025_AIB_TOURNAMENT):
+def tournament_dryrun(tournament_slug: str = None):
     """
     Dry-run mode: fetch tournament data, write state files, no forecasts.
     
+    IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    The tournament_slug parameter is IGNORED and exists only for backward compatibility.
+    
     Args:
-        tournament_slug: Tournament slug or ID
+        tournament_slug: IGNORED - kept for backward compatibility only
     
     Writes:
         - .aib-state/open_ids.json: List of {question_id, post_id} dicts
         - mc_results.json: Dryrun results with question metadata
     """
-    print(f"[TOURNAMENT DRYRUN] Starting for tournament: {tournament_slug}")
+    # Always use hardcoded tournament - ignore parameter
+    actual_tournament = FALL_2025_AIB_TOURNAMENT
+    
+    # Log configuration once as required
+    print(f"[CONFIG] Using hardcoded tournament: {actual_tournament}")
+    print(f"[TOURNAMENT DRYRUN] Starting for tournament: {actual_tournament}")
     
     # Fetch (question_id, post_id) pairs from tournament
-    pairs = get_open_question_ids_from_tournament(tournament_id=tournament_slug)
+    pairs = get_open_question_ids_from_tournament()
     
     if not pairs:
         raise RuntimeError("No open questions returned by posts API.")
@@ -2475,8 +2484,14 @@ def tournament_dryrun(tournament_slug: str = FALL_2025_AIB_TOURNAMENT):
 def run_tournament(mode="dryrun", publish=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
+    
+    IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    This cannot be overridden.
+    
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
+    # Log configuration once as required
+    print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
     print(f"[TOURNAMENT MODE: {mode}] Starting...")
     
     # Fetch questions from Metaculus tournament API

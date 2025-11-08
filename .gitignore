@@ -178,3 +178,7 @@ cython_debug/
 
 # MacOS
 .DS_Store
+mc_results.json
+mc_reasons.txt
+posted_ids.json
+submit_smoke_payload.json
