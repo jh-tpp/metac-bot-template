@@ -15,7 +15,6 @@ print("="*70)
 # Set up environment
 os.environ['OPENROUTER_API_KEY'] = 'test_key'
 os.environ['METACULUS_TOKEN'] = 'test_token'
-os.environ['FALL_2025_AI_BENCHMARKING_ID'] = '3512'
 
 import main
 from main import (
@@ -23,13 +22,13 @@ from main import (
     get_open_question_ids_from_tournament,
     fetch_tournament_questions,
     AIB_STATE_DIR,
-    FALL_2025_AI_BENCHMARKING_ID
+    FALL_2025_AIB_TOURNAMENT
 )
 
-print("\nTest 1: Verify tournament ID configuration")
-print(f"  Tournament ID: {FALL_2025_AI_BENCHMARKING_ID}")
-assert FALL_2025_AI_BENCHMARKING_ID == 3512, "Should use configured tournament ID"
-print("  ✓ Tournament ID correctly configured")
+print("\nTest 1: Verify tournament slug is hardcoded")
+print(f"  Tournament slug: {FALL_2025_AIB_TOURNAMENT}")
+assert FALL_2025_AIB_TOURNAMENT == "fall-aib-2025", "Should use hardcoded tournament slug"
+print("  ✓ Tournament slug correctly hardcoded to 'fall-aib-2025'")
 
 print("\nTest 2: Verify AIB_STATE_DIR configuration")
 print(f"  State directory: {AIB_STATE_DIR}")
@@ -95,6 +94,7 @@ with patch('main.requests.get') as mock_get:
     mock_response.headers = {"Content-Type": "application/json"}
     mock_get.return_value = mock_response
     
+    # Tournament ID parameter is ignored now - function uses hardcoded slug
     result = list_posts_from_tournament(tournament_id=3512, offset=0, count=50)
     
     assert result is not None, "Should return data"
@@ -106,13 +106,18 @@ with patch('main.requests.get') as mock_get:
     mock_get.assert_called_once()
     call_args = mock_get.call_args
     url = call_args[0][0] if call_args[0] else call_args[1].get('url')
+    params = call_args[1].get('params', {})
     assert "api/posts/" in url, f"Should call /api/posts/ endpoint, got {url}"
+    # Verify hardcoded tournament slug is used
+    assert params.get('tournaments') == str(FALL_2025_AIB_TOURNAMENT), f"Should use hardcoded tournament slug, got {params.get('tournaments')}"
     print("  ✓ Calls correct endpoint: /api/posts/")
+    print(f"  ✓ Uses hardcoded tournament slug: {FALL_2025_AIB_TOURNAMENT}")
 
 print("\nTest 5: Test get_open_question_ids_from_tournament with mock")
 with patch('main.list_posts_from_tournament') as mock_list:
     mock_list.return_value = mock_post_data
     
+    # Tournament ID parameter is ignored now
     pairs = get_open_question_ids_from_tournament(tournament_id=3512)
     
     assert len(pairs) == 2, f"Should return 2 open questions, got {len(pairs)}"
@@ -120,11 +125,13 @@ with patch('main.list_posts_from_tournament') as mock_list:
     assert pairs[1] == (1002, 101), f"Second pair should be (1002, 101), got {pairs[1]}"
     print("  ✓ Correctly extracts (question_id, post_id) pairs")
     print("  ✓ Filters out closed posts")
+    print("  ✓ Tournament ID parameter ignored (uses hardcoded slug)")
 
 print("\nTest 6: Test fetch_tournament_questions with mock")
 with patch('main.list_posts_from_tournament') as mock_list:
     mock_list.return_value = mock_post_data
     
+    # Tournament ID parameter is ignored now
     questions = fetch_tournament_questions(tournament_id=3512)
     
     assert len(questions) == 2, f"Should return 2 questions, got {len(questions)}"
@@ -143,6 +150,7 @@ with patch('main.list_posts_from_tournament') as mock_list:
     assert len(q2["options"]) == 2, "Should extract option names"
     assert q2["options"][0] == "Option A", "Option names should match"
     print("  ✓ Correctly handles multiple choice questions")
+    print("  ✓ All parameters ignored (uses hardcoded tournament slug)")
 
 print("\nTest 7: Test artifact creation (open_ids.json)")
 with patch('main.list_posts_from_tournament') as mock_list:
@@ -153,6 +161,7 @@ with patch('main.list_posts_from_tournament') as mock_list:
     if AIB_STATE_DIR.exists():
         shutil.rmtree(AIB_STATE_DIR)
     
+    # Tournament ID parameter is ignored now
     questions = fetch_tournament_questions(tournament_id=3512)
     
     # Manually create artifacts like run_tournament would
@@ -180,9 +189,10 @@ print("\n" + "="*70)
 print("✅ ALL INTEGRATION TESTS PASSED")
 print("="*70)
 print("\nSummary:")
-print("  ✓ Tournament ID correctly configured (3512)")
+print(f"  ✓ Tournament slug hardcoded to '{FALL_2025_AIB_TOURNAMENT}'")
 print("  ✓ State directory correctly configured (.aib-state)")
 print("  ✓ list_posts_from_tournament calls /api/posts/")
+print("  ✓ All tournament parameters ignored (hardcoded slug enforced)")
 print("  ✓ get_open_question_ids_from_tournament extracts (question_id, post_id)")
 print("  ✓ fetch_tournament_questions returns normalized questions with post_id")
 print("  ✓ Question types correctly inferred (binary, multiple_choice)")
