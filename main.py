@@ -1,3 +1,23 @@
+"""
+Metaculus Forecasting Bot - Main Entry Point
+
+IMPORTANT: Tournament Configuration
+====================================
+This bot is HARDCODED to forecast on the Fall 2025 AI Benchmarking tournament
+(slug: "fall-aib-2025"). This is intentional to prevent accidental forecasting
+on wrong tournaments due to environment variable misconfiguration.
+
+The tournament identifier CANNOT be overridden via:
+- Environment variables (TOURNAMENT, TOURNAMENT_ID, METACULUS_TOURNAMENT)
+- Command-line arguments (--tournament)
+- Function parameters
+
+All tournament-related functions use the FALL_2025_AIB_TOURNAMENT constant
+defined in metaculus_posts.py, which is set to "fall-aib-2025".
+
+This ensures that all forecasts, comments, and artifacts are submitted to the
+correct tournament, preventing production errors.
+"""
 import os
 import sys
 import json
