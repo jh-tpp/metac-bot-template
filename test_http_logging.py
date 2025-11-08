@@ -112,12 +112,18 @@ print("="*70)
 
 from http_logging import save_http_artifacts
 
+# Enable HTTP logging for this test
+os.environ["HTTP_LOGGING_ENABLED"] = "true"
+import importlib
+import http_logging
+importlib.reload(http_logging)
+
 # Use a temporary directory for testing
 with tempfile.TemporaryDirectory() as tmpdir:
-    # Override the HTTP_LOGS_DIR for testing
-    import http_logging
-    original_dir = http_logging.HTTP_LOGS_DIR
-    http_logging.HTTP_LOGS_DIR = Path(tmpdir)
+    # Override the HTTP_LOGS_DIR for testing (not used anymore, artifacts go to .http-artifacts)
+    # But the function creates files in .http-artifacts which is in tmpdir during test
+    original_cwd = os.getcwd()
+    os.chdir(tmpdir)
     
     request_data = {
         "method": "GET",
@@ -130,6 +136,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         "body": {"result": "ok"}
     }
     
+    from http_logging import save_http_artifacts
     req_file, resp_file = save_http_artifacts("test_prefix", request_data, response_data)
     
     assert req_file is not None, "Request file should be created"
@@ -147,37 +154,47 @@ with tempfile.TemporaryDirectory() as tmpdir:
         assert saved_response["status_code"] == 200, "Response data should be saved correctly"
     
     # Restore original directory
-    http_logging.HTTP_LOGS_DIR = original_dir
+    os.chdir(original_cwd)
+
+# Disable HTTP logging after test
+os.environ["HTTP_LOGGING_ENABLED"] = "false"
+importlib.reload(http_logging)
 
 print("✓ save_http_artifacts tests passed")
 
 print("\n" + "="*70)
-print("Test 5: LOG_IO_DISABLE environment variable")
+print("Test 5: HTTP_LOGGING_ENABLED environment variable")
 print("="*70)
 
-# Test with logging disabled
-os.environ["LOG_IO_DISABLE"] = "true"
+# Test with logging disabled (default)
+if "HTTP_LOGGING_ENABLED" in os.environ:
+    del os.environ["HTTP_LOGGING_ENABLED"]
 
 # Re-import to pick up the environment variable
-import importlib
 importlib.reload(http_logging)
 
-from http_logging import _is_logging_enabled, save_http_artifacts
+from http_logging import _enabled, save_http_artifacts
 
-assert not _is_logging_enabled(), "Logging should be disabled when LOG_IO_DISABLE=true"
+assert not _enabled(), "Logging should be disabled by default"
 
 # Test that save_http_artifacts returns None when disabled
 req_file, resp_file = save_http_artifacts("test", {}, {})
 assert req_file is None, "Should return None when logging is disabled"
 assert resp_file is None, "Should return None when logging is disabled"
 
-# Clean up
-del os.environ["LOG_IO_DISABLE"]
+# Test enabling logging
+os.environ["HTTP_LOGGING_ENABLED"] = "true"
 importlib.reload(http_logging)
 
-assert http_logging._is_logging_enabled(), "Logging should be enabled by default"
+assert http_logging._enabled(), "Logging should be enabled when HTTP_LOGGING_ENABLED=true"
 
-print("✓ LOG_IO_DISABLE tests passed")
+# Clean up
+del os.environ["HTTP_LOGGING_ENABLED"]
+importlib.reload(http_logging)
+
+assert not http_logging._enabled(), "Logging should be disabled by default after cleanup"
+
+print("✓ HTTP_LOGGING_ENABLED tests passed")
 
 print("\n" + "="*70)
 print("All HTTP logging tests passed!")

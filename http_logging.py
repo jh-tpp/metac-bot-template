@@ -2,7 +2,7 @@
 HTTP Logging Utility
 
 Provides comprehensive request/response logging for all external API calls.
-Always enabled by default to make debugging effortless. Can be disabled via LOG_IO_DISABLE env var.
+Disabled by default to reduce noise. Can be enabled via HTTP_LOGGING_ENABLED env var.
 """
 import os
 import json
@@ -12,24 +12,26 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
 
-# Check if logging is disabled (emergency opt-out)
-_LOG_IO_DISABLE = os.environ.get("LOG_IO_DISABLE", "").lower() in ("1", "true", "t", "yes", "y", "on")
-
-# Verbosity level: "minimal", "normal", "verbose" (default: minimal to reduce noise)
-_LOG_VERBOSITY = os.environ.get("LOG_VERBOSITY", "minimal").lower()
+# Check if logging is enabled (opt-in, default: false)
+HTTP_LOGGING_ENABLED = str(os.getenv("HTTP_LOGGING_ENABLED", "false")).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Directory for HTTP log artifacts
-HTTP_LOGS_DIR = Path("cache/http_logs")
+HTTP_LOGS_DIR = Path(".http-artifacts")
 
 
 def _is_logging_enabled() -> bool:
-    """Check if HTTP logging is enabled (default: True, disabled only if LOG_IO_DISABLE is set)."""
-    return not _LOG_IO_DISABLE
+    """Check if HTTP logging is enabled (default: False)."""
+    return HTTP_LOGGING_ENABLED
 
 
-def _is_verbose() -> bool:
-    """Check if verbose logging is enabled (prints full request/response bodies)."""
-    return _LOG_VERBOSITY in ("verbose", "full", "debug")
+def _enabled():
+    """Alias for _is_logging_enabled for consistency."""
+    return HTTP_LOGGING_ENABLED
 
 def sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
     """
@@ -46,8 +48,14 @@ def sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
     
     # Headers to redact
     sensitive_keys = {
-        "authorization", "api-key", "x-api-key", "api_key", 
-        "secret", "token", "password", "bearer"
+        "authorization",
+        "api-key",
+        "x-api-key",
+        "api_key",
+        "secret",
+        "token",
+        "password",
+        "bearer",
     }
     
     sanitized = {}
@@ -63,17 +71,17 @@ def sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
 
 
 def print_http_request(
+    *,
     method: str,
     url: str,
     headers: Optional[Dict[str, str]] = None,
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
     data_body: Optional[Any] = None,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
 ) -> None:
     """
-    Print HTTP request details to stdout with flushing for real-time visibility.
-    Verbosity controlled by LOG_VERBOSITY env var (default: minimal).
+    Print HTTP request details to stdout (only if HTTP_LOGGING_ENABLED=true).
     
     Args:
         method: HTTP method (GET, POST, etc.)
@@ -84,207 +92,149 @@ def print_http_request(
         data_body: Non-JSON request body
         timeout: Request timeout in seconds
     """
-    if not _is_logging_enabled():
+    if not _enabled():
         return
     
-    # Minimal logging: just method and URL
-    print(f"[HTTP] {method} {url}", flush=True)
-    
-    # Verbose logging: include full details
-    if _is_verbose():
-        print("="*70, flush=True)
-        print("=== HTTP REQUEST ===", flush=True)
-        print("="*70, flush=True)
-        
-        if headers:
-            print(f"Headers: {json.dumps(sanitize_headers(headers), indent=2)}", flush=True)
-        
-        if params:
-            print(f"Params: {json.dumps(params, indent=2)}", flush=True)
-        
-        if json_body is not None:
-            print("JSON Body:", flush=True)
-            print(json.dumps(json_body, indent=2, ensure_ascii=False), flush=True)
-        
-        if data_body is not None:
-            print("Data Body:", flush=True)
-            if isinstance(data_body, (dict, list)):
-                print(json.dumps(data_body, indent=2, ensure_ascii=False), flush=True)
-            else:
-                print(str(data_body), flush=True)
-        
-        if timeout is not None:
-            print(f"Timeout: {timeout}s", flush=True)
-        
-        print("="*70 + "\n", flush=True)
+    print("\n" + "=" * 70 + "\n=== HTTP REQUEST ===\n" + "=" * 70)
+    print(f"Method: {method}")
+    print(f"URL: {url}")
+    if params:
+        print("Params:", params)
+    if headers:
+        safe = sanitize_headers(headers)
+        print("Headers:", safe)
+    if json_body is not None:
+        print("JSON:", json_body)
+    if data_body is not None:
+        print("Data:", data_body)
+    if timeout is not None:
+        print(f"Timeout: {timeout}s")
+    print("=" * 70 + "\n")
 
 
 def print_http_response(resp) -> None:
     """
-    Print HTTP response details to stdout with flushing for real-time visibility.
-    Verbosity controlled by LOG_VERBOSITY env var (default: minimal).
+    Print HTTP response details to stdout (only if HTTP_LOGGING_ENABLED=true).
     
     Args:
         resp: requests.Response object
     """
-    if not _is_logging_enabled():
+    if not _enabled():
         return
     
-    # Minimal logging: just status code
-    print(f"[HTTP] Response: {resp.status_code} {resp.reason}", flush=True)
-    
-    # Verbose logging: include full body
-    if _is_verbose():
-        print("="*70, flush=True)
-        print("=== HTTP RESPONSE ===", flush=True)
-        print("="*70, flush=True)
-        
-        # Print headers (sanitized)
-        print("Headers:", flush=True)
-        sanitized = sanitize_headers(dict(resp.headers))
-        for key, value in sanitized.items():
-            print(f"  {key}: {value}", flush=True)
-        
-        # Print content-type and encoding
-        content_type = resp.headers.get("Content-Type", "unknown")
-        print(f"Content-Type: {content_type}", flush=True)
-        print(f"Encoding: {resp.encoding}", flush=True)
-        
-        # Print full body
-        print("\nResponse Body:", flush=True)
+    print("\n" + "=" * 70 + "\n=== HTTP RESPONSE ===\n" + "=" * 70)
+    print(f"Status: {resp.status_code} {resp.reason}")
+    ct = resp.headers.get("content-type", "")
+    if "json" in ct.lower():
         try:
-            # Try to parse as JSON for pretty printing
-            body_json = resp.json()
-            print(json.dumps(body_json, indent=2, ensure_ascii=False), flush=True)
+            print("Body:", resp.json())
         except Exception:
-            # Not JSON or parse error - print as text
-            try:
-                body_text = resp.text
-                print(body_text, flush=True)
-            except Exception as e:
-                # Binary or encoding issues
-                print(f"<Binary content or encoding error: {e}>", flush=True)
-                print(f"<Content length: {len(resp.content)} bytes>", flush=True)
-        
-        print("="*70 + "\n", flush=True)
+            print("Body(raw):", resp.text[:2000])
+    else:
+        print("Body(text):", resp.text[:2000])
+    print("=" * 70 + "\n")
 
 
-def save_http_artifacts(
-    prefix: str,
-    request_dict: Dict[str, Any],
-    response_dict: Optional[Dict[str, Any]] = None
-) -> Tuple[Optional[Path], Optional[Path]]:
+def save_http_artifacts(tag, request_artifact, response_artifact):
     """
-    Save HTTP request and response as JSON artifacts to disk.
+    Save HTTP request and response as JSON artifacts (only if HTTP_LOGGING_ENABLED=true).
     
     Args:
-        prefix: Filename prefix (e.g., "llm", "metaculus", "asknews")
-        request_dict: Dictionary containing request details
-        response_dict: Optional dictionary containing response details
+        tag: Tag for filename (e.g., "llm", "metaculus")
+        request_artifact: Request artifact dict
+        response_artifact: Response artifact dict
     
     Returns:
-        Tuple of (request_file_path, response_file_path) or (None, None) if logging disabled
+        Tuple of (request_file_path, response_file_path) or (None, None) if disabled
     """
-    if not _is_logging_enabled():
+    if not _enabled():
         return None, None
     
     try:
-        # Create directory if it doesn't exist
-        HTTP_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        import json
+        import os
+
+        os.makedirs(".http-artifacts", exist_ok=True)
         
-        # Generate timestamp
+        # Generate timestamp for unique filenames
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
         
         # Save request
-        request_file = HTTP_LOGS_DIR / f"{timestamp}_{prefix}_request.json"
-        with open(request_file, "w", encoding="utf-8") as f:
-            json.dump(request_dict, f, indent=2, ensure_ascii=False)
+        request_file = Path(f".http-artifacts/{timestamp}_{tag}_request.json")
+        with open(request_file, "w") as f:
+            json.dump(request_artifact, f, indent=2)
         
-        response_file = None
-        if response_dict:
-            # Save response
-            response_file = HTTP_LOGS_DIR / f"{timestamp}_{prefix}_response.json"
-            with open(response_file, "w", encoding="utf-8") as f:
-                json.dump(response_dict, f, indent=2, ensure_ascii=False)
+        # Save response
+        response_file = Path(f".http-artifacts/{timestamp}_{tag}_response.json")
+        with open(response_file, "w") as f:
+            json.dump(response_artifact, f, indent=2)
         
         return request_file, response_file
-    
     except Exception as e:
         # Don't fail the main operation if logging fails
-        print(f"[WARN] Failed to save HTTP artifacts: {e}", file=sys.stderr, flush=True)
+        if _enabled():
+            print(f"[WARN] Failed to save HTTP artifacts: {e}", file=sys.stderr, flush=True)
         return None, None
 
 
 def prepare_request_artifact(
-    method: str,
-    url: str,
+    method: str = None,
+    url: str = None,
     headers: Optional[Dict[str, str]] = None,
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
     data_body: Optional[Any] = None,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
-    Prepare a request artifact dictionary for saving to disk.
-    Headers are sanitized automatically.
-    
-    Args:
-        method: HTTP method
-        url: Request URL
-        headers: Request headers (will be sanitized)
-        params: Query parameters
-        json_body: JSON request body
-        data_body: Non-JSON request body
-        timeout: Request timeout
+    Prepare lightweight request artifact dict (always available).
     
     Returns:
-        Dictionary suitable for JSON serialization
+        Dict with request metadata
     """
     artifact = {
         "timestamp": datetime.utcnow().isoformat(),
-        "method": method,
-        "url": url
     }
     
-    if headers:
+    if method is not None:
+        artifact["method"] = method
+    if url is not None:
+        artifact["url"] = url
+    if headers is not None:
         artifact["headers"] = sanitize_headers(headers)
-    
-    if params:
+    if params is not None:
         artifact["params"] = params
-    
     if json_body is not None:
         artifact["json_body"] = json_body
-    
     if data_body is not None:
         if isinstance(data_body, (dict, list)):
             artifact["data_body"] = data_body
         else:
             artifact["data_body"] = str(data_body)
-    
     if timeout is not None:
         artifact["timeout"] = timeout
+    
+    # Include any additional kwargs
+    artifact.update(kwargs)
     
     return artifact
 
 
 def prepare_response_artifact(resp) -> Dict[str, Any]:
     """
-    Prepare a response artifact dictionary for saving to disk.
-    Headers are sanitized automatically.
-    
-    Args:
-        resp: requests.Response object
+    Prepare lightweight response artifact dict (always available).
     
     Returns:
-        Dictionary suitable for JSON serialization
+        Dict with response metadata and sample body
     """
     artifact = {
         "timestamp": datetime.utcnow().isoformat(),
         "status_code": resp.status_code,
         "reason": resp.reason,
         "headers": sanitize_headers(dict(resp.headers)),
+        "content_type": resp.headers.get("Content-Type", "unknown"),
         "encoding": resp.encoding,
-        "content_type": resp.headers.get("Content-Type", "unknown")
     }
     
     # Try to include body
@@ -297,7 +247,8 @@ def prepare_response_artifact(resp) -> Dict[str, Any]:
             artifact["body"] = resp.text
         except Exception as e:
             # Binary or encoding issues
-            artifact["body"] = f"<Binary content or encoding error: {e}>"
-            artifact["content_length"] = len(resp.content)
+            artifact["body"] = f"<error reading body: {e}>"
+            if hasattr(resp, 'content'):
+                artifact["content_length"] = len(resp.content)
     
     return artifact
