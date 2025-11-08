@@ -6,6 +6,8 @@ test_fetch.py
 cache/
 manual_test_debug.py
 manual_test_mc_debug.py
+.aib-state/
+.http-artifacts/
 
 
 ### General gitignore ###

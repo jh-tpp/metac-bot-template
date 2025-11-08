@@ -18,6 +18,12 @@ from http_logging import (
     print_http_request, print_http_response,
     save_http_artifacts, prepare_request_artifact, prepare_response_artifact
 )
+from metaculus_fetch import fetch_question_with_fallback, FetchError
+from metaculus_posts import (
+    get_open_question_ids_from_tournament,
+    get_post_details,
+    FALL_2025_AIB_TOURNAMENT,
+)
 
 # ========== Constants ==========
 N_WORLDS_DEFAULT = 3  # for tests
@@ -83,6 +89,24 @@ FALL_2025_AI_BENCHMARKING_ID = int(os.environ.get("FALL_2025_AI_BENCHMARKING_ID"
 
 # State directory for workflow artifacts
 AIB_STATE_DIR = Path(".aib-state")
+
+# ========== State Management Helpers ==========
+def _ensure_state_dir():
+    """Create .aib-state directory if it doesn't exist."""
+    AIB_STATE_DIR.mkdir(exist_ok=True)
+
+
+def _write_open_ids(pairs):
+    """
+    Write (question_id, post_id) pairs to .aib-state/open_ids.json.
+    
+    Args:
+        pairs: List of (question_id, post_id) tuples
+    """
+    _ensure_state_dir()
+    with open(AIB_STATE_DIR / "open_ids.json", "w") as f:
+        json.dump([{"question_id": q, "post_id": p} for q, p in pairs], f, indent=2)
+
 
 # ========== Diagnostics Enable Flag ==========
 DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "false")
@@ -1921,112 +1945,36 @@ def _create_session_with_retry():
     session.mount("https://", adapter)
     return session
 
-def _hydrate_question_with_diagnostics(qid):
+def _hydrate_question_with_diagnostics(qid, post_id=None):
     """
-    Fetch a single question from Metaculus API with comprehensive diagnostics.
-    Uses only the preferred detail URL with trailing slash.
+    Fetch a single question from Metaculus API using resilient fetch module.
     
     Args:
         qid: Question ID
+        post_id: Optional post ID for preferred fetch path
     
     Returns:
-        Question dict or None on failure
+        Post object containing 'question' field or None on failure
+    
+    Raises:
+        RuntimeError: If METACULUS_TOKEN is not set or fetch fails
     """
     print(f"\n[HYDRATE] Starting fetch for Q{qid}", flush=True)
     
-    session = _create_session_with_retry()
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "metac-bot-template/1.0"
-    }
-    
-    # Use only the preferred URL: with trailing slash, plain detail
-    url = f"{METACULUS_API_BASE}{qid}/"
-    params = {}
-    label = "detail with trailing slash"
-    
-    print(f"\n[HYDRATE] Q{qid} - {label}", flush=True)
-    print(f"  Request headers: {headers}", flush=True)
-    
-    # HTTP logging: log request
-    print_http_request(
-        method="GET",
-        url=url,
-        headers=headers,
-        params=params,
-        timeout=20
-    )
+    # Preflight check: ensure METACULUS_TOKEN is set
+    if not os.getenv("METACULUS_TOKEN"):
+        raise RuntimeError("METACULUS_TOKEN not set; smoke test requires auth")
     
     try:
-        resp = session.get(url, params=params, headers=headers, timeout=20)
-        resp.raise_for_status()
-        
-        # HTTP logging: log response
-        print_http_response(resp)
-        
-        # HTTP logging: save artifacts
-        request_artifact = prepare_request_artifact(
-            method="GET",
-            url=url,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
-        response_artifact = prepare_response_artifact(resp)
-        save_http_artifacts(f"hydrate_q{qid}", request_artifact, response_artifact)
-        
-        raw_text = resp.text
-        parsed_obj = resp.json()
-        
-        # Log comprehensive diagnostics
-        _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, url, params)
-        
-        # Write debug files
-        prefix = f"debug_q_{qid}"
-        _write_debug_files(prefix, raw_text, parsed_obj)
-        
-        print(f"[HYDRATE] Q{qid} - SUCCESS", flush=True)
-        
-        # Write final object
-        print(f"\n[HYDRATE] Q{qid} - Writing final object", flush=True)
-        final_prefix = f"debug_q_{qid}_final"
-        try:
-            final_file = f"{final_prefix}.json"
-            with open(final_file, "w", encoding="utf-8") as f:
-                json.dump(parsed_obj, f, indent=2, ensure_ascii=False)
-            print(f"[HYDRATE] Q{qid} - Wrote final object to {final_file}", flush=True)
-            print(f"[HYDRATE] Q{qid} - Final top-level keys: {list(parsed_obj.keys())}", flush=True)
-            
-            # Normalize the object and write normalized version
-            normalized = _normalize_question_object(parsed_obj)
-            if normalized:
-                normalized_file = f"{final_prefix}_normalized.json"
-                with open(normalized_file, "w", encoding="utf-8") as f:
-                    # Don't include raw in the output file
-                    output = {k: v for k, v in normalized.items() if k != "raw"}
-                    json.dump(output, f, indent=2, ensure_ascii=False)
-                print(f"[HYDRATE] Q{qid} - Wrote normalized object to {normalized_file}", flush=True)
-                print(f"[HYDRATE] Q{qid} - Normalized type: {normalized.get('type')}", flush=True)
-            else:
-                print(f"[HYDRATE] Q{qid} - Could not normalize object (unknown type)", flush=True)
-        except Exception as e:
-            print(f"[ERROR] Failed to write final object for Q{qid}: {e}", flush=True)
-            traceback.print_exc()
-        
-        return parsed_obj
-        
-    except requests.exceptions.HTTPError as e:
-        print(f"[HYDRATE] Q{qid} - FAILED: HTTP {e.response.status_code}", flush=True)
-        traceback.print_exc()
-        return None
-    except requests.exceptions.Timeout as e:
-        print(f"[HYDRATE] Q{qid} - FAILED: Timeout", flush=True)
-        traceback.print_exc()
-        return None
-    except Exception as e:
-        print(f"[HYDRATE] Q{qid} - FAILED: {type(e).__name__}: {e}", flush=True)
-        traceback.print_exc()
-        return None
+        post_obj = fetch_question_with_fallback(qid, post_id)
+    except FetchError as e:
+        raise RuntimeError(f"Could not fetch question {qid}: {e}") from e
+    
+    if "question" not in post_obj:
+        raise RuntimeError(f"Hydration returned no 'question' for {qid}")
+    
+    print(f"[HYDRATE] Q{qid} - SUCCESS", flush=True)
+    return post_obj
 
 def run_live_test():
     """
@@ -2475,6 +2423,55 @@ def run_test_mode():
     print("\n[TEST MODE] Complete. Artifacts: mc_results.json, mc_reasons.txt")
 
 # ========== Tournament Modes ==========
+def tournament_dryrun(tournament_slug: str = FALL_2025_AIB_TOURNAMENT):
+    """
+    Dry-run mode: fetch tournament data, write state files, no forecasts.
+    
+    Args:
+        tournament_slug: Tournament slug or ID
+    
+    Writes:
+        - .aib-state/open_ids.json: List of {question_id, post_id} dicts
+        - mc_results.json: Dryrun results with question metadata
+    """
+    print(f"[TOURNAMENT DRYRUN] Starting for tournament: {tournament_slug}")
+    
+    # Fetch (question_id, post_id) pairs from tournament
+    pairs = get_open_question_ids_from_tournament(tournament_id=tournament_slug)
+    
+    if not pairs:
+        raise RuntimeError("No open questions returned by posts API.")
+    
+    print(f"[INFO] Found {len(pairs)} open questions in tournament")
+    
+    # Write .aib-state/open_ids.json
+    _write_open_ids(pairs)
+    print(f"[INFO] Wrote .aib-state/open_ids.json")
+    
+    # Build dryrun results with question titles
+    results = []
+    for qid, pid in pairs:
+        try:
+            post = get_post_details(pid)
+            title = post.get("question", {}).get("title", f"Q{qid}")
+        except Exception:
+            title = f"Q{qid}"
+        
+        results.append({
+            "question_id": qid,
+            "post_id": pid,
+            "question_title": title,
+            "forecast_payload": "<dryrun>",
+            "status": "dryrun"
+        })
+    
+    # Write mc_results.json
+    with open("mc_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"[TOURNAMENT DRYRUN] Complete. Wrote .aib-state/open_ids.json and mc_results.json for {len(pairs)} questions")
+
+
 def run_tournament(mode="dryrun", publish=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
@@ -2649,7 +2646,7 @@ def main():
         if args.mode == "test_questions":
             run_test_mode()
         elif args.mode == "tournament_dryrun":
-            run_tournament(mode="dryrun", publish=False)
+            tournament_dryrun()
         elif args.mode == "tournament_submit":
             run_tournament(mode="submit", publish=True)
     else:
