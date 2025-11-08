@@ -1,6 +1,40 @@
 # Security Summary
 
-## Latest: Restore Original Forecast and Comment Submission Logic
+## Latest: Refactor Metaculus API Logic to Use Official Template Approach
+
+### CodeQL Analysis Results
+- **Status**: ✅ PASSED
+- **Alerts Found**: 0
+- **Language**: Python
+- **Scan Date**: 2025-11-08
+
+### Security Review
+
+**Changes Made:**
+- Switched from `/api/questions/?search=project:32813` to `/api/posts/?tournaments=[id]&statuses=open`
+- Added new functions: `list_posts_from_tournament()`, `get_open_question_ids_from_tournament()`, `get_post_details()`
+- Updated `fetch_tournament_questions()` to use `/api/posts/` endpoint
+- Changed numeric CDF from 101 to 201 values with strict monotonicity
+- Reduced logging verbosity (default: minimal)
+
+**Security Measures:**
+- ✅ No new dependencies added (uses existing `requests`, `pathlib`, `json`)
+- ✅ All existing credential sanitization maintained
+- ✅ Tournament ID validated as integer before use
+- ✅ No user-controlled paths in file operations
+- ✅ Tokens still redacted in all logs and diagnostics
+- ✅ HTTPS used for all API calls
+- ✅ Proper error handling without exposing sensitive data
+- ✅ `.aib-state/` directory uses safe `Path.mkdir(exist_ok=True)`
+
+**Vulnerabilities Discovered:**
+- **None** - Zero security vulnerabilities found
+
+**Conclusion**: ✅ No security vulnerabilities. Code maintains all existing security measures. Safe for production deployment.
+
+---
+
+## Previous: Restore Original Forecast and Comment Submission Logic
 
 ### CodeQL Analysis Results
 - **Status**: ✅ PASSED
