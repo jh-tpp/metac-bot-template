@@ -78,6 +78,12 @@ METACULUS_PROJECT_ID = os.environ.get("METACULUS_PROJECT_ID", "32813")
 METACULUS_PROJECT_SLUG = os.environ.get("METACULUS_PROJECT_SLUG", "fall-aib-2025")
 METACULUS_CONTEST_SLUG = os.environ.get("METACULUS_CONTEST_SLUG", "fall-aib")
 
+# Fall 2025 AI Benchmarking tournament ID (for /api/posts/ endpoint)
+FALL_2025_AI_BENCHMARKING_ID = int(os.environ.get("FALL_2025_AI_BENCHMARKING_ID", "3512"))
+
+# State directory for workflow artifacts
+AIB_STATE_DIR = Path(".aib-state")
+
 # ========== Diagnostics Enable Flag ==========
 DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "false")
 DIAGNOSTICS_USE = _parse_bool_flag(DIAGNOSTICS_ENABLED, default=True)
@@ -204,6 +210,175 @@ def _debug_log_fetch(qid, label, resp, raw_text, parsed_obj, request_url, reques
         print(f"\nParsed response is not a dict: {type(parsed_obj)}", flush=True)
     
     print(f"{'='*60}\n", flush=True)
+
+# ========== New Tournament API Functions (Official Template Approach) ==========
+def list_posts_from_tournament(tournament_id=None, offset=0, count=50):
+    """
+    Fetch posts from a Metaculus tournament using /api/posts/ endpoint.
+    
+    Args:
+        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
+        offset: Pagination offset (default 0)
+        count: Number of posts to fetch (default 50, max 100)
+    
+    Returns:
+        dict with 'results' list of posts, or None on failure
+    """
+    if tournament_id is None:
+        tournament_id = FALL_2025_AI_BENCHMARKING_ID
+    
+    url = "https://www.metaculus.com/api/posts/"
+    params = {
+        "limit": min(count, 100),
+        "offset": offset,
+        "order_by": "-hotness",
+        "forecast_type": "binary,multiple_choice,numeric,discrete",
+        "tournaments": str(tournament_id),
+        "statuses": "open",
+        "include_description": "true"
+    }
+    
+    try:
+        print(f"[INFO] Fetching posts from tournament {tournament_id} (offset={offset}, count={count})")
+        
+        # HTTP logging: log request
+        print_http_request(
+            method="GET",
+            url=url,
+            params=params,
+            timeout=30
+        )
+        
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        
+        # HTTP logging: log response
+        print_http_response(resp)
+        
+        # HTTP logging: save artifacts
+        request_artifact = prepare_request_artifact(
+            method="GET",
+            url=url,
+            params=params,
+            timeout=30
+        )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts("metaculus_posts_list", request_artifact, response_artifact)
+        
+        data = resp.json()
+        print(f"[INFO] Fetched {len(data.get('results', []))} posts from tournament {tournament_id}")
+        
+        return data
+        
+    except requests.exceptions.HTTPError as e:
+        status = getattr(e.response, "status_code", "N/A")
+        try:
+            detail = e.response.text[:400]
+        except Exception:
+            detail = str(e)
+        print(f"[ERROR] Failed to fetch tournament posts (HTTP {status}): {detail}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch tournament posts: {e}")
+        return None
+
+
+def get_open_question_ids_from_tournament(tournament_id=None):
+    """
+    Get list of (question_id, post_id) tuples for open questions in a tournament.
+    
+    Args:
+        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
+    
+    Returns:
+        List of (question_id, post_id) tuples
+    """
+    if tournament_id is None:
+        tournament_id = FALL_2025_AI_BENCHMARKING_ID
+    
+    all_pairs = []
+    offset = 0
+    count = 50
+    
+    while True:
+        data = list_posts_from_tournament(tournament_id=tournament_id, offset=offset, count=count)
+        if not data:
+            break
+        
+        results = data.get("results", [])
+        if not results:
+            break
+        
+        for post in results:
+            # Filter by status=open at the post level
+            if post.get("status") != "open":
+                continue
+            
+            # Extract question from post
+            question = post.get("question")
+            if not question:
+                continue
+            
+            question_id = question.get("id")
+            post_id = post.get("id")
+            
+            if question_id and post_id:
+                all_pairs.append((question_id, post_id))
+        
+        # Check if there are more pages
+        if len(results) < count:
+            break
+        offset += count
+    
+    print(f"[INFO] Found {len(all_pairs)} open questions in tournament {tournament_id}")
+    return all_pairs
+
+
+def get_post_details(post_id):
+    """
+    Fetch detailed information for a specific post.
+    
+    Args:
+        post_id: Metaculus post ID
+    
+    Returns:
+        Post dict or None on failure
+    """
+    url = f"https://www.metaculus.com/api/posts/{post_id}/"
+    
+    try:
+        # HTTP logging: log request
+        print_http_request(
+            method="GET",
+            url=url,
+            timeout=15
+        )
+        
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        
+        # HTTP logging: log response (suppress for brevity)
+        # print_http_response(resp)
+        
+        # HTTP logging: save artifacts
+        request_artifact = prepare_request_artifact(
+            method="GET",
+            url=url,
+            timeout=15
+        )
+        response_artifact = prepare_response_artifact(resp)
+        save_http_artifacts(f"metaculus_post_{post_id}", request_artifact, response_artifact)
+        
+        return resp.json()
+        
+    except requests.exceptions.HTTPError as e:
+        status = getattr(e.response, "status_code", "N/A")
+        print(f"[ERROR] Failed to fetch post {post_id} (HTTP {status})")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch post {post_id}: {e}")
+        return None
+
 
 # ========== Tournament Question Fetcher ==========
 def _get_core_question(raw):
@@ -691,213 +866,115 @@ def _infer_qtype_and_fields(q):
     
     return (qtype, extra)
 
-def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=None):
+def fetch_tournament_questions(contest_slug=None, project_id=None, project_slug=None, tournament_id=None):
     """
-    Fetch open questions from a Metaculus project or contest.
+    Fetch open questions from a Metaculus tournament using /api/posts/ endpoint.
     
     Args:
-        contest_slug: Contest slug to filter by (legacy fallback)
-        project_id: Project ID to filter by (preferred, defaults to METACULUS_PROJECT_ID)
-        project_slug: Project slug to filter by (alternative, defaults to METACULUS_PROJECT_SLUG)
+        contest_slug: Unused (kept for backwards compatibility)
+        project_id: Unused (kept for backwards compatibility)
+        project_slug: Unused (kept for backwards compatibility)
+        tournament_id: Tournament ID (defaults to FALL_2025_AI_BENCHMARKING_ID)
     
     Returns:
-        List of question dicts normalized for pipeline
+        List of question dicts normalized for pipeline, with post_id included
     """
-    from typing import List, Dict, Any
+    if tournament_id is None:
+        tournament_id = FALL_2025_AI_BENCHMARKING_ID
     
-    # Prioritize project-based targeting with safe fallbacks
-    if project_id is None:
-        project_id = METACULUS_PROJECT_ID
-    if project_slug is None:
-        project_slug = METACULUS_PROJECT_SLUG
-    if contest_slug is None:
-        contest_slug = METACULUS_CONTEST_SLUG
+    print(f"[INFO] Fetching tournament questions from tournament {tournament_id} using /api/posts/")
     
-    url = METACULUS_API_BASE
+    # Fetch all posts from tournament
+    all_posts = []
+    offset = 0
+    count = 50
     
-    # Try project ID first, then project slug, then contest slug fallback
-    if project_id:
-        filter_str = f"project:{project_id}"
-        filter_desc = f"project:{project_id}"
-    elif project_slug:
-        filter_str = f"project:{project_slug}"
-        filter_desc = f"project:{project_slug}"
-    else:
-        filter_str = f"contest:{contest_slug}"
-        filter_desc = f"contest:{contest_slug}"
+    while True:
+        data = list_posts_from_tournament(tournament_id=tournament_id, offset=offset, count=count)
+        if not data:
+            break
+        
+        results = data.get("results", [])
+        if not results:
+            break
+        
+        all_posts.extend(results)
+        
+        # Check if there are more pages
+        if len(results) < count:
+            break
+        offset += count
     
-    params = {
-        "search": filter_str,
-        "status": "open",
-        "limit": 1000,
-        "order_by": "-activity"
-        # Remove expand and fields - detail endpoint already returns complete question object
-    }
+    print(f"[INFO] Fetched {len(all_posts)} posts from tournament {tournament_id}")
     
-    try:
-        print(f"[INFO] Fetching tournament questions with filter: {filter_desc}")
+    # Extract questions from posts
+    questions = []
+    skipped_count = 0
+    
+    for post in all_posts:
+        # Skip non-open posts
+        if post.get("status") != "open":
+            continue
         
-        # HTTP logging: log request
-        print_http_request(
-            method="GET",
-            url=url,
-            params=params,
-            timeout=30
-        )
+        # Extract question from post
+        question_data = post.get("question")
+        if not question_data:
+            continue
         
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
+        question_id = question_data.get("id")
+        post_id = post.get("id")
         
-        # HTTP logging: log response
-        print_http_response(resp)
+        if not question_id:
+            continue
         
-        # HTTP logging: save artifacts
-        request_artifact = prepare_request_artifact(
-            method="GET",
-            url=url,
-            params=params,
-            timeout=30
-        )
-        response_artifact = prepare_response_artifact(resp)
-        save_http_artifacts("metaculus_list", request_artifact, response_artifact)
+        # Initialize diagnostic trace for this question
+        trace = None
+        if DIAGNOSTICS_USE:
+            try:
+                trace = DiagnosticTrace(question_id, base_dir=DIAGNOSTICS_TRACE_DIR)
+                # Save raw post/question as received from Metaculus
+                _diag_save(trace, "00_raw_question", {"post": post, "question": question_data}, redact=False)
+            except Exception as e:
+                print(f"[WARN] Failed to initialize diagnostics for Q{question_id}: {e}", flush=True)
         
-        data = resp.json()
+        # Use _classify_question to get type and options
+        qtype, options_list = _classify_question(question_data)
         
-        raw_questions = data.get("results", [])
-        print(f"[INFO] Fetched {len(raw_questions)} questions from Metaculus API")
+        # Skip if type is unknown/unmappable
+        if qtype is None:
+            print(f"[SKIP] Unknown/unsupported question type for Q{question_id}")
+            skipped_count += 1
+            continue
         
-        # Identify questions missing 'possibility'/'possibilities' field and hydrate them
-        questions_to_hydrate = []
-        for q in raw_questions:
-            core = _get_core_question(q)
-            if not core.get("possibility") and not core.get("possibilities"):
-                questions_to_hydrate.append(q.get("id"))
+        # Extract title and description from question
+        core = _get_core_question(question_data)
+        title = core.get("title") or question_data.get("title") or post.get("title") or ""
+        description = core.get("description") or question_data.get("description") or ""
         
-        if questions_to_hydrate:
-            print(f"[INFO] Hydrating possibility for {len(questions_to_hydrate)} questions (per-ID fetch)...")
-            for qid in questions_to_hydrate:
-                try:
-                    # Call detail endpoint without expand/fields to get native v2 structure
-                    hydrate_url = f"{METACULUS_API_BASE}{qid}/"
-                    
-                    # HTTP logging: log request
-                    print_http_request(
-                        method="GET",
-                        url=hydrate_url,
-                        timeout=15
-                    )
-                    
-                    hydrate_resp = requests.get(hydrate_url, timeout=15)
-                    hydrate_resp.raise_for_status()
-                    
-                    # HTTP logging: log response
-                    print_http_response(hydrate_resp)
-                    
-                    # HTTP logging: save artifacts
-                    request_artifact = prepare_request_artifact(
-                        method="GET",
-                        url=hydrate_url,
-                        timeout=15
-                    )
-                    response_artifact = prepare_response_artifact(hydrate_resp)
-                    save_http_artifacts(f"metaculus_hydrate_{qid}", request_artifact, response_artifact)
-                    
-                    hydrated_data = hydrate_resp.json()
-                    
-                    # Find the question in raw_questions and update it
-                    for q in raw_questions:
-                        if q.get("id") == qid:
-                            # If hydrated_data has a nested 'question' key, use that
-                            hydrated_core = hydrated_data.get("question")
-                            if hydrated_core:
-                                q["question"] = hydrated_core
-                            else:
-                                # Otherwise merge the whole hydrated_data as core
-                                # This handles the case where detail returns flat structure
-                                for key in ["possibility", "possibilities", "type", "title", "description"]:
-                                    if key in hydrated_data:
-                                        q[key] = hydrated_data[key]
-                            break
-                except Exception as e:
-                    print(f"[WARN] Failed to hydrate question {qid}: {e}")
+        # Build normalized question with post_id
+        normalized = {
+            "id": question_id,
+            "post_id": post_id,  # IMPORTANT: needed for comment submission
+            "type": qtype,
+            "title": title,
+            "description": description,
+            "url": f"https://www.metaculus.com/questions/{question_id}/"
+        }
         
-        # Debug smoke-print: show sample of first 5 questions
-        print(f"[DEBUG] Sample of first {min(5, len(raw_questions))} questions:")
-        for i, q in enumerate(raw_questions[:5]):
-            qid = q.get("id", "?")
-            poss = q.get("possibility", {})
-            poss_type = poss.get("type", "") if poss else ""
-            q_type = q.get("type", "")
-            print(f"  ({qid}, {repr(poss_type)}, {repr(q_type)})")
+        # For multiple_choice, use options from classification
+        if qtype == "multiple_choice":
+            normalized["options"] = options_list
         
-        # Minimal pass-through to pipeline format
-        questions = []
-        skipped_count = 0
+        # Save normalized question with raw for trace
+        if trace:
+            normalized_with_raw = normalized.copy()
+            normalized_with_raw["raw"] = {"post": post, "question": question_data}
+            _diag_save(trace, "01_normalized", normalized_with_raw, redact=False)
         
-        for q in raw_questions:
-            qid = q.get("id")
-            if not qid:
-                continue
-            
-            # Initialize diagnostic trace for this question
-            trace = None
-            if DIAGNOSTICS_USE:
-                try:
-                    trace = DiagnosticTrace(qid, base_dir=DIAGNOSTICS_TRACE_DIR)
-                    # Save raw question as received from Metaculus
-                    _diag_save(trace, "00_raw_question", q, redact=False)
-                except Exception as e:
-                    print(f"[WARN] Failed to initialize diagnostics for Q{qid}: {e}", flush=True)
-            
-            # Use new _classify_question to get type and options
-            qtype, options_list = _classify_question(q)
-            
-            # Skip if type is unknown/unmappable
-            if qtype is None:
-                print(f"[SKIP] Unknown/unsupported question type for Q{qid}")
-                skipped_count += 1
-                continue
-            
-            # Extract title and description from core
-            core = _get_core_question(q)
-            title = core.get("title") or q.get("title") or ""
-            description = core.get("description") or q.get("description") or ""
-            
-            # Build minimal normalized question
-            normalized = {
-                "id": qid,
-                "type": qtype,
-                "title": title,
-                "description": description,
-                "url": f"https://www.metaculus.com/questions/{qid}/"
-            }
-            
-            # For multiple_choice, use options from classification
-            if qtype == "multiple_choice":
-                normalized["options"] = options_list
-            
-            # Save normalized question with raw for trace (keep raw in normalized for diagnostics)
-            if trace:
-                normalized_with_raw = normalized.copy()
-                normalized_with_raw["raw"] = q
-                _diag_save(trace, "01_normalized", normalized_with_raw, redact=False)
-            
-            questions.append(normalized)
-        
-        print(f"[INFO] Summary: Fetched {len(raw_questions)}, Normalized {len(questions)}, Skipped {skipped_count}")
-        return questions
-        
-    except requests.exceptions.HTTPError as e:
-        status = getattr(e.response, "status_code", "N/A")
-        try:
-            detail = e.response.text[:400]
-        except Exception:
-            detail = str(e)
-        print(f"[ERROR] Failed to fetch tournament questions (HTTP {status}): {detail}")
-        return []
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch tournament questions: {e}")
-        return []
+        questions.append(normalized)
+    
+    print(f"[INFO] Summary: Fetched {len(all_posts)} posts, Normalized {len(questions)}, Skipped {skipped_count}")
+    return questions
 
 # ========== AskNews Cache Helpers ==========
 def _load_news_cache():
@@ -2401,7 +2478,7 @@ def run_test_mode():
 def run_tournament(mode="dryrun", publish=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
-    Writes state files: open_ids.json (dryrun), posted_ids.json (submit).
+    Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
     print(f"[TOURNAMENT MODE: {mode}] Starting...")
     
@@ -2412,12 +2489,15 @@ def run_tournament(mode="dryrun", publish=False):
         print("[ERROR] No questions fetched. Check Metaculus API integration.")
         return
     
-    # Write open_ids.json in dryrun mode
+    # Create .aib-state directory if needed
+    AIB_STATE_DIR.mkdir(exist_ok=True)
+    
+    # Write .aib-state/open_ids.json (always, per requirements)
     open_ids = [q["id"] for q in questions]
-    if mode == "dryrun":
-        with open("open_ids.json", "w", encoding="utf-8") as f:
-            json.dump(open_ids, f, indent=2)
-        print(f"[INFO] Wrote {len(open_ids)} open question IDs to open_ids.json")
+    open_ids_file = AIB_STATE_DIR / "open_ids.json"
+    with open(open_ids_file, "w", encoding="utf-8") as f:
+        json.dump(open_ids, f, indent=2)
+    print(f"[INFO] Wrote {len(open_ids)} open question IDs to {open_ids_file}")
     
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)

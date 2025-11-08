@@ -319,7 +319,13 @@ def _aggregate_multiple_choice(world_results: List[List[float]], options: List) 
 
 
 def _aggregate_numeric(world_results: List[float]) -> Dict:
-    """Aggregate numeric world results."""
+    """
+    Aggregate numeric world results.
+    
+    Per official template requirements:
+    - Generate exactly 201 CDF values
+    - Ensure strict monotonicity with minimum step of 5e-05
+    """
     if not world_results:
         raise RuntimeError("No valid numeric worlds")
     
@@ -332,13 +338,23 @@ def _aggregate_numeric(world_results: List[float]) -> Dict:
     lo = lo - range_padding
     hi = hi + range_padding
     
-    # Create grid
-    grid = [lo + (hi - lo) * i / 100 for i in range(101)]
+    # Create grid with exactly 201 points (per official template)
+    n_points = 201
+    grid = [lo + (hi - lo) * i / (n_points - 1) for i in range(n_points)]
     
     # Compute CDF
     cdf = []
     for x in grid:
         cdf.append(sum(1 for v in values if v <= x) / len(values))
+    
+    # Enforce strict monotonicity with minimum step of 5e-05
+    min_step = 5e-05
+    for i in range(1, len(cdf)):
+        if cdf[i] <= cdf[i-1]:
+            cdf[i] = cdf[i-1] + min_step
+    
+    # Clamp to [0, 1]
+    cdf = [min(1.0, max(0.0, c)) for c in cdf]
     
     # Compute percentiles
     p10 = _percentile(values, 0.10)

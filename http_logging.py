@@ -15,6 +15,9 @@ from typing import Optional, Dict, Any, Tuple
 # Check if logging is disabled (emergency opt-out)
 _LOG_IO_DISABLE = os.environ.get("LOG_IO_DISABLE", "").lower() in ("1", "true", "t", "yes", "y", "on")
 
+# Verbosity level: "minimal", "normal", "verbose" (default: minimal to reduce noise)
+_LOG_VERBOSITY = os.environ.get("LOG_VERBOSITY", "minimal").lower()
+
 # Directory for HTTP log artifacts
 HTTP_LOGS_DIR = Path("cache/http_logs")
 
@@ -23,6 +26,10 @@ def _is_logging_enabled() -> bool:
     """Check if HTTP logging is enabled (default: True, disabled only if LOG_IO_DISABLE is set)."""
     return not _LOG_IO_DISABLE
 
+
+def _is_verbose() -> bool:
+    """Check if verbose logging is enabled (prints full request/response bodies)."""
+    return _LOG_VERBOSITY in ("verbose", "full", "debug")
 
 def sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
     """
@@ -66,6 +73,7 @@ def print_http_request(
 ) -> None:
     """
     Print HTTP request details to stdout with flushing for real-time visibility.
+    Verbosity controlled by LOG_VERBOSITY env var (default: minimal).
     
     Args:
         method: HTTP method (GET, POST, etc.)
@@ -79,39 +87,42 @@ def print_http_request(
     if not _is_logging_enabled():
         return
     
-    print("\n" + "="*70, flush=True)
-    print("=== HTTP REQUEST ===", flush=True)
-    print("="*70, flush=True)
-    print(f"Method: {method}", flush=True)
-    print(f"URL: {url}", flush=True)
+    # Minimal logging: just method and URL
+    print(f"[HTTP] {method} {url}", flush=True)
     
-    if headers:
-        print(f"Headers: {json.dumps(sanitize_headers(headers), indent=2)}", flush=True)
-    
-    if params:
-        print(f"Params: {json.dumps(params, indent=2)}", flush=True)
-    
-    if json_body is not None:
-        print("JSON Body:", flush=True)
-        print(json.dumps(json_body, indent=2, ensure_ascii=False), flush=True)
-    
-    if data_body is not None:
-        print("Data Body:", flush=True)
-        if isinstance(data_body, (dict, list)):
-            print(json.dumps(data_body, indent=2, ensure_ascii=False), flush=True)
-        else:
-            print(str(data_body), flush=True)
-    
-    if timeout is not None:
-        print(f"Timeout: {timeout}s", flush=True)
-    
-    print("="*70 + "\n", flush=True)
+    # Verbose logging: include full details
+    if _is_verbose():
+        print("="*70, flush=True)
+        print("=== HTTP REQUEST ===", flush=True)
+        print("="*70, flush=True)
+        
+        if headers:
+            print(f"Headers: {json.dumps(sanitize_headers(headers), indent=2)}", flush=True)
+        
+        if params:
+            print(f"Params: {json.dumps(params, indent=2)}", flush=True)
+        
+        if json_body is not None:
+            print("JSON Body:", flush=True)
+            print(json.dumps(json_body, indent=2, ensure_ascii=False), flush=True)
+        
+        if data_body is not None:
+            print("Data Body:", flush=True)
+            if isinstance(data_body, (dict, list)):
+                print(json.dumps(data_body, indent=2, ensure_ascii=False), flush=True)
+            else:
+                print(str(data_body), flush=True)
+        
+        if timeout is not None:
+            print(f"Timeout: {timeout}s", flush=True)
+        
+        print("="*70 + "\n", flush=True)
 
 
 def print_http_response(resp) -> None:
     """
     Print HTTP response details to stdout with flushing for real-time visibility.
-    Prints FULL body without truncation.
+    Verbosity controlled by LOG_VERBOSITY env var (default: minimal).
     
     Args:
         resp: requests.Response object
@@ -119,39 +130,43 @@ def print_http_response(resp) -> None:
     if not _is_logging_enabled():
         return
     
-    print("\n" + "="*70, flush=True)
-    print("=== HTTP RESPONSE ===", flush=True)
-    print("="*70, flush=True)
-    print(f"Status: {resp.status_code} {resp.reason}", flush=True)
+    # Minimal logging: just status code
+    print(f"[HTTP] Response: {resp.status_code} {resp.reason}", flush=True)
     
-    # Print headers (sanitized)
-    print("Headers:", flush=True)
-    sanitized = sanitize_headers(dict(resp.headers))
-    for key, value in sanitized.items():
-        print(f"  {key}: {value}", flush=True)
-    
-    # Print content-type and encoding
-    content_type = resp.headers.get("Content-Type", "unknown")
-    print(f"Content-Type: {content_type}", flush=True)
-    print(f"Encoding: {resp.encoding}", flush=True)
-    
-    # Print full body
-    print("\nResponse Body:", flush=True)
-    try:
-        # Try to parse as JSON for pretty printing
-        body_json = resp.json()
-        print(json.dumps(body_json, indent=2, ensure_ascii=False), flush=True)
-    except Exception:
-        # Not JSON or parse error - print as text
+    # Verbose logging: include full body
+    if _is_verbose():
+        print("="*70, flush=True)
+        print("=== HTTP RESPONSE ===", flush=True)
+        print("="*70, flush=True)
+        
+        # Print headers (sanitized)
+        print("Headers:", flush=True)
+        sanitized = sanitize_headers(dict(resp.headers))
+        for key, value in sanitized.items():
+            print(f"  {key}: {value}", flush=True)
+        
+        # Print content-type and encoding
+        content_type = resp.headers.get("Content-Type", "unknown")
+        print(f"Content-Type: {content_type}", flush=True)
+        print(f"Encoding: {resp.encoding}", flush=True)
+        
+        # Print full body
+        print("\nResponse Body:", flush=True)
         try:
-            body_text = resp.text
-            print(body_text, flush=True)
-        except Exception as e:
-            # Binary or encoding issues
-            print(f"<Binary content or encoding error: {e}>", flush=True)
-            print(f"<Content length: {len(resp.content)} bytes>", flush=True)
-    
-    print("="*70 + "\n", flush=True)
+            # Try to parse as JSON for pretty printing
+            body_json = resp.json()
+            print(json.dumps(body_json, indent=2, ensure_ascii=False), flush=True)
+        except Exception:
+            # Not JSON or parse error - print as text
+            try:
+                body_text = resp.text
+                print(body_text, flush=True)
+            except Exception as e:
+                # Binary or encoding issues
+                print(f"<Binary content or encoding error: {e}>", flush=True)
+                print(f"<Content length: {len(resp.content)} bytes>", flush=True)
+        
+        print("="*70 + "\n", flush=True)
 
 
 def save_http_artifacts(
