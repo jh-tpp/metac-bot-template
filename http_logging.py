@@ -33,7 +33,7 @@ def _enabled():
     """Alias for _is_logging_enabled for consistency."""
     return HTTP_LOGGING_ENABLED
 
-def _sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+def sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
     """
     Sanitize headers by redacting sensitive values.
     
@@ -63,7 +63,7 @@ def _sanitize_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
         key_lower = key.lower()
         # Check if any sensitive keyword is in the key
         if any(sensitive in key_lower for sensitive in sensitive_keys):
-            sanitized[key] = "<redacted>"
+            sanitized[key] = "[REDACTED]"
         else:
             sanitized[key] = value
     
@@ -101,7 +101,7 @@ def print_http_request(
     if params:
         print("Params:", params)
     if headers:
-        safe = _sanitize_headers(headers)
+        safe = sanitize_headers(headers)
         print("Headers:", safe)
     if json_body is not None:
         print("JSON:", json_body)
@@ -143,39 +143,112 @@ def save_http_artifacts(tag, request_artifact, response_artifact):
         tag: Tag for filename (e.g., "llm", "metaculus")
         request_artifact: Request artifact dict
         response_artifact: Response artifact dict
+    
+    Returns:
+        Tuple of (request_file_path, response_file_path) or (None, None) if disabled
     """
     if not _enabled():
-        return
-    import json
-    import os
+        return None, None
+    
+    try:
+        import json
+        import os
 
-    os.makedirs(".http-artifacts", exist_ok=True)
-    with open(f".http-artifacts/{tag}_request.json", "w") as f:
-        json.dump(request_artifact, f, indent=2)
-    with open(f".http-artifacts/{tag}_response.json", "w") as f:
-        json.dump(response_artifact, f, indent=2)
+        os.makedirs(".http-artifacts", exist_ok=True)
+        
+        # Generate timestamp for unique filenames
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        
+        # Save request
+        request_file = Path(f".http-artifacts/{timestamp}_{tag}_request.json")
+        with open(request_file, "w") as f:
+            json.dump(request_artifact, f, indent=2)
+        
+        # Save response
+        response_file = Path(f".http-artifacts/{timestamp}_{tag}_response.json")
+        with open(response_file, "w") as f:
+            json.dump(response_artifact, f, indent=2)
+        
+        return request_file, response_file
+    except Exception as e:
+        # Don't fail the main operation if logging fails
+        if _enabled():
+            print(f"[WARN] Failed to save HTTP artifacts: {e}", file=sys.stderr, flush=True)
+        return None, None
 
 
-def prepare_request_artifact(**kwargs):
+def prepare_request_artifact(
+    method: str = None,
+    url: str = None,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    data_body: Optional[Any] = None,
+    timeout: Optional[float] = None,
+    **kwargs
+) -> Dict[str, Any]:
     """
     Prepare lightweight request artifact dict (always available).
     
     Returns:
-        Dict with request metadata (headers excluded for brevity)
+        Dict with request metadata
     """
-    return {"request": {k: v for k, v in kwargs.items() if k != "headers"}}
+    artifact = {
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    
+    if method is not None:
+        artifact["method"] = method
+    if url is not None:
+        artifact["url"] = url
+    if headers is not None:
+        artifact["headers"] = sanitize_headers(headers)
+    if params is not None:
+        artifact["params"] = params
+    if json_body is not None:
+        artifact["json_body"] = json_body
+    if data_body is not None:
+        if isinstance(data_body, (dict, list)):
+            artifact["data_body"] = data_body
+        else:
+            artifact["data_body"] = str(data_body)
+    if timeout is not None:
+        artifact["timeout"] = timeout
+    
+    # Include any additional kwargs
+    artifact.update(kwargs)
+    
+    return artifact
 
 
-def prepare_response_artifact(resp):
+def prepare_response_artifact(resp) -> Dict[str, Any]:
     """
     Prepare lightweight response artifact dict (always available).
     
     Returns:
         Dict with response metadata and sample body
     """
-    return {
-        "status": resp.status_code,
+    artifact = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "status_code": resp.status_code,
         "reason": resp.reason,
-        "headers": dict(resp.headers),
-        "body_sample": resp.text[:1024],
+        "headers": sanitize_headers(dict(resp.headers)),
+        "content_type": resp.headers.get("Content-Type", "unknown"),
+        "encoding": resp.encoding,
     }
+    
+    # Try to include body
+    try:
+        # Try JSON first
+        artifact["body"] = resp.json()
+    except Exception:
+        # Fall back to text
+        try:
+            artifact["body"] = resp.text
+        except Exception as e:
+            # Binary or encoding issues
+            artifact["body"] = f"<error reading body: {e}>"
+            if hasattr(resp, 'content'):
+                artifact["content_length"] = len(resp.content)
+    
+    return artifact
