@@ -74,15 +74,15 @@ jobs:
         run: |
           mkdir -p .aib-state
           
-          # Ensure open_ids.json exists
-          if [ ! -f open_ids.json ]; then
-            echo "Error: open_ids.json not found"
+          # Ensure open_ids.json exists (now in .aib-state/)
+          if [ ! -f .aib-state/open_ids.json ]; then
+            echo "Error: .aib-state/open_ids.json not found"
             echo "should_submit=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Load open IDs
-          open_ids=$(cat open_ids.json)
+          # Load open IDs from .aib-state/
+          open_ids=$(cat .aib-state/open_ids.json)
           
           # Load posted IDs (create empty if doesn't exist)
           if [ ! -f .aib-state/posted_ids.json ]; then
@@ -96,8 +96,17 @@ jobs:
           import sys
           
           try:
-              with open('open_ids.json', 'r') as f:
-                  open_ids = set(json.load(f))
+              # Read from .aib-state/
+              with open('.aib-state/open_ids.json', 'r') as f:
+                  open_data = json.load(f)
+                  # Handle both list of ints and list of dicts with question_id
+                  if isinstance(open_data, list) and len(open_data) > 0:
+                      if isinstance(open_data[0], dict):
+                          open_ids = set(item['question_id'] for item in open_data)
+                      else:
+                          open_ids = set(open_data)
+                  else:
+                      open_ids = set()
               
               with open('.aib-state/posted_ids.json', 'r') as f:
                   posted_ids = set(json.load(f))
@@ -198,7 +207,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: open-ids
-          path: open_ids.json
+          path: .aib-state/open_ids.json
       
       - name: Upload posted IDs
         if: always()
