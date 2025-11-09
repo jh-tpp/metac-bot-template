@@ -120,6 +120,77 @@ def _write_open_ids(pairs):
         json.dump([{"question_id": q, "post_id": p} for q, p in pairs], f, indent=2)
 
 
+def _load_posted_ids():
+    """
+    Load list of already-posted question IDs from .aib-state/posted_ids.json.
+    
+    Returns:
+        set of question IDs (integers)
+    """
+    posted_file = AIB_STATE_DIR / "posted_ids.json"
+    if not posted_file.exists():
+        return set()
+    
+    try:
+        with open(posted_file, "r") as f:
+            posted_list = json.load(f)
+            return set(posted_list)
+    except Exception as e:
+        print(f"[WARN] Failed to load posted_ids.json: {e}")
+        return set()
+
+
+def _append_posted_id(question_id):
+    """
+    Append a question ID to .aib-state/posted_ids.json atomically.
+    
+    Args:
+        question_id: Question ID to append
+    """
+    _ensure_state_dir()
+    posted_file = AIB_STATE_DIR / "posted_ids.json"
+    
+    # Load existing
+    posted_ids = _load_posted_ids()
+    
+    # Add new ID
+    posted_ids.add(question_id)
+    
+    # Write atomically
+    temp_file = posted_file.with_suffix(".json.tmp")
+    try:
+        with open(temp_file, "w") as f:
+            json.dump(sorted(list(posted_ids)), f, indent=2)
+        temp_file.replace(posted_file)
+    except Exception as e:
+        print(f"[ERROR] Failed to write posted_ids.json: {e}")
+        if temp_file.exists():
+            temp_file.unlink()
+
+
+def fetch_open_pairs():
+    """
+    Fetch open (question_id, post_id) pairs from Fall 2025 AIB tournament.
+    
+    This is the single unified function for fetching tournament questions.
+    It performs paginated API calls and writes .aib-state/open_ids.json
+    before returning.
+    
+    Returns:
+        List of (question_id, post_id) tuples for open questions
+    """
+    print(f"[INFO] Fetching open questions from tournament {FALL_2025_AIB_TOURNAMENT}")
+    
+    # Use existing function from metaculus_posts
+    pairs = get_open_question_ids_from_tournament()
+    
+    # Write to .aib-state/open_ids.json atomically
+    _write_open_ids(pairs)
+    print(f"[INFO] Wrote {len(pairs)} open question pairs to .aib-state/open_ids.json")
+    
+    return pairs
+
+
 # ========== Diagnostics Enable Flag ==========
 DIAGNOSTICS_ENABLED = os.environ.get("DIAGNOSTICS_ENABLED", "false")
 DIAGNOSTICS_USE = _parse_bool_flag(DIAGNOSTICS_ENABLED, default=True)
@@ -1854,7 +1925,7 @@ def validate_mc_result(question_obj, result):
     return True, ""
 
 # ========== Forecast Submission (with guardrails) ==========
-def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, trace=None):
+def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, trace=None, persist_posted=False):
     """
     Post forecast if all checks pass.
     
@@ -1862,15 +1933,16 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, tr
         question_obj: Metaculus question dict
         mc_result: dict with 'p' or 'probs' or 'cdf'/'grid', plus 'reasoning'
         publish: bool, actually POST or just dry-run
-        skip_set: set of qids already forecasted (optional)
+        skip_set: set of qids already forecasted (optional, in-memory tracking)
         trace: Optional DiagnosticTrace for saving diagnostics
+        persist_posted: bool, if True persist to .aib-state/posted_ids.json after successful submission
     
     Returns:
         bool success
     """
     qid = question_obj.get("id")
     if skip_set and qid in skip_set:
-        print(f"[SKIP] Question {qid} already forecasted (dedupe).")
+        print(f"[SKIP] Question {qid} already forecasted (in-memory dedupe).")
         return False
     
     if question_obj.get("resolution") is not None:
@@ -1939,8 +2011,14 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, tr
                 # Don't fail the whole operation if comment fails
                 print(f"[WARN] Failed to post comment for Q{qid}: {comment_error}")
         
+        # Step 3: Update tracking sets/files
         if skip_set is not None:
             skip_set.add(qid)
+        
+        if persist_posted:
+            _append_posted_id(qid)
+            print(f"[INFO] Added Q{qid} to .aib-state/posted_ids.json")
+        
         return True
     except Exception as e:
         print(f"[ERROR] Failed to post Q{qid}: {e}")
@@ -2465,18 +2543,12 @@ def tournament_dryrun(tournament_slug: str = None):
     print(f"[CONFIG] Using hardcoded tournament: {actual_tournament}")
     print(f"[TOURNAMENT DRYRUN] Starting for tournament: {actual_tournament}")
     
-    # Fetch (question_id, post_id) pairs from tournament
-    pairs = get_open_question_ids_from_tournament()
+    # Fetch (question_id, post_id) pairs from tournament using unified function
+    pairs = fetch_open_pairs()
     
     # Handle zero questions gracefully
     if not pairs:
         print(f"[INFO] No open questions in tournament {actual_tournament}; wrote empty artifacts and exiting gracefully.")
-        
-        # Write empty .aib-state/open_ids.json
-        _ensure_state_dir()
-        with open(AIB_STATE_DIR / "open_ids.json", "w") as f:
-            json.dump([], f, indent=2)
-        print(f"[INFO] Wrote empty .aib-state/open_ids.json")
         
         # Write empty mc_results.json with summary structure
         summary = {
@@ -2493,10 +2565,6 @@ def tournament_dryrun(tournament_slug: str = None):
         return
     
     print(f"[INFO] Found {len(pairs)} open questions in tournament")
-    
-    # Write .aib-state/open_ids.json
-    _write_open_ids(pairs)
-    print(f"[INFO] Wrote .aib-state/open_ids.json")
     
     # Build dryrun results with question titles
     results = []
@@ -2522,18 +2590,31 @@ def tournament_dryrun(tournament_slug: str = None):
     print(f"[TOURNAMENT DRYRUN] Complete. Wrote .aib-state/open_ids.json and mc_results.json for {len(pairs)} questions")
 
 
-def run_tournament(mode="dryrun", publish=False):
+def run_tournament(mode="dryrun", publish=False, force=False):
     """
     Fetch tournament questions, run MC, post (if publish=True).
     
     IMPORTANT: Tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
     This cannot be overridden.
     
+    Args:
+        mode: "dryrun" or "submit"
+        publish: If True, actually submit forecasts
+        force: If True, ignore posted_ids.json and forecast on all questions
+    
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
-    print(f"[TOURNAMENT MODE: {mode}] Starting...")
+    print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force})")
+    
+    # Load posted IDs unless force=True
+    posted_ids = set()
+    if not force:
+        posted_ids = _load_posted_ids()
+        print(f"[INFO] Loaded {len(posted_ids)} already-posted question IDs from .aib-state/posted_ids.json")
+    else:
+        print(f"[INFO] Force mode enabled - ignoring posted_ids.json")
     
     # Fetch questions from Metaculus tournament API
     questions = fetch_tournament_questions()
@@ -2581,15 +2662,40 @@ def run_tournament(mode="dryrun", publish=False):
         json.dump(open_ids, f, indent=2)
     print(f"[INFO] Wrote {len(open_ids)} open question IDs to {open_ids_file}")
     
-    qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions}
+    # Filter out already-posted questions
+    questions_to_process = []
+    skipped_count = 0
+    for q in questions:
+        qid = q["id"]
+        if qid in posted_ids:
+            print(f"[SKIP] Question {qid} already posted, skipping")
+            skipped_count += 1
+        else:
+            questions_to_process.append(q)
+    
+    print(f"[INFO] Processing {len(questions_to_process)} new questions (skipped {skipped_count} already posted)")
+    
+    if not questions_to_process:
+        print(f"[INFO] No new questions to process")
+        # Still write artifacts
+        with open("mc_results.json", "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2, ensure_ascii=False)
+        with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+            f.write("")
+        if mode == "submit" and publish:
+            with open("posted_ids.json", "w", encoding="utf-8") as f:
+                json.dump([], f, indent=2)
+        return
+    
+    qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions_to_process}
     news = fetch_facts_for_batch(qid_to_text, max_per_q=ASKNEWS_MAX_PER_Q)
     
-    skip_set = set()  # dedupe already-forecasted
+    skip_set = set()  # in-memory dedupe for this run
     all_results = []
     all_reasons = []
-    posted_ids = []  # track successfully posted IDs for submit mode
+    posted_ids_this_run = []  # track successfully posted IDs for submit mode
     
-    for q in questions:
+    for q in questions_to_process:
         qid = q["id"]
         facts = news.get(qid, [])
         
@@ -2628,15 +2734,23 @@ def run_tournament(mode="dryrun", publish=False):
             all_reasons.append(f"  • {b}")
         all_reasons.append("")
         
-        success = post_forecast_safe(q, aggregate, publish=publish, skip_set=skip_set, trace=trace)
+        # Post forecast with persistent tracking
+        success = post_forecast_safe(
+            q, 
+            aggregate, 
+            publish=publish, 
+            skip_set=skip_set, 
+            trace=trace,
+            persist_posted=(mode == "submit" and publish)  # Only persist in submit mode
+        )
         if success and publish:
-            posted_ids.append(qid)
+            posted_ids_this_run.append(qid)
     
-    # Write posted_ids.json in submit mode
+    # Write posted_ids.json in submit mode (for CI workflow compatibility)
     if mode == "submit" and publish:
         with open("posted_ids.json", "w", encoding="utf-8") as f:
-            json.dump(posted_ids, f, indent=2)
-        print(f"[INFO] Wrote {len(posted_ids)} posted question IDs to posted_ids.json")
+            json.dump(posted_ids_this_run, f, indent=2)
+        print(f"[INFO] Wrote {len(posted_ids_this_run)} posted question IDs to posted_ids.json")
     
     # Write artifacts
     with open("mc_results.json", "w", encoding="utf-8") as f:
@@ -2683,12 +2797,18 @@ def main():
         action="store_true",
         help="Actually submit forecasts (use with submit_smoke_test modes)"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore posted_ids.json and forecast on all questions (use with tournament_submit)"
+    )
     args = parser.parse_args()
     
     # Handle environment variables as fallbacks
     qid_from_env = os.environ.get("QID")
     worlds_from_env = os.environ.get("WORLDS")
     publish_from_env = os.environ.get("PUBLISH")
+    force_from_env = os.environ.get("FORCE")
     
     # Handle new flags first
     if args.live_test:
@@ -2733,7 +2853,9 @@ def main():
         elif args.mode == "tournament_dryrun":
             tournament_dryrun()
         elif args.mode == "tournament_submit":
-            run_tournament(mode="submit", publish=True)
+            # Use --force or FORCE env var
+            force = args.force or _parse_bool_flag(force_from_env, default=False)
+            run_tournament(mode="submit", publish=True, force=force)
     else:
         parser.error("Must specify either --mode, --live-test, or --submit-smoke-test")
 
