@@ -2468,8 +2468,29 @@ def tournament_dryrun(tournament_slug: str = None):
     # Fetch (question_id, post_id) pairs from tournament
     pairs = get_open_question_ids_from_tournament()
     
+    # Handle zero questions gracefully
     if not pairs:
-        raise RuntimeError("No open questions returned by posts API.")
+        print(f"[INFO] No open questions in tournament {actual_tournament}; wrote empty artifacts and exiting gracefully.")
+        
+        # Write empty .aib-state/open_ids.json
+        _ensure_state_dir()
+        with open(AIB_STATE_DIR / "open_ids.json", "w") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Wrote empty .aib-state/open_ids.json")
+        
+        # Write empty mc_results.json with summary structure
+        summary = {
+            "results": [],
+            "count": 0,
+            "tournament": actual_tournament,
+            "status": "dryrun_empty"
+        }
+        with open("mc_results.json", "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[INFO] Wrote empty mc_results.json")
+        
+        print(f"[TOURNAMENT DRYRUN] Complete. No questions to process.")
+        return
     
     print(f"[INFO] Found {len(pairs)} open questions in tournament")
     
@@ -2517,8 +2538,37 @@ def run_tournament(mode="dryrun", publish=False):
     # Fetch questions from Metaculus tournament API
     questions = fetch_tournament_questions()
     
+    # Handle zero questions gracefully
     if not questions:
-        print("[ERROR] No questions fetched. Check Metaculus API integration.")
+        print(f"[INFO] No open questions in tournament {FALL_2025_AIB_TOURNAMENT}; wrote empty artifacts and exiting gracefully.")
+        
+        # Create .aib-state directory if needed
+        AIB_STATE_DIR.mkdir(exist_ok=True)
+        
+        # Write empty .aib-state/open_ids.json
+        open_ids_file = AIB_STATE_DIR / "open_ids.json"
+        with open(open_ids_file, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Wrote empty {open_ids_file}")
+        
+        # Write empty mc_results.json with summary structure
+        summary = {
+            "results": [],
+            "count": 0,
+            "tournament": FALL_2025_AIB_TOURNAMENT,
+            "status": f"{mode}_empty"
+        }
+        with open("mc_results.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] Wrote empty mc_results.json")
+        
+        # Write empty posted_ids.json in submit mode
+        if mode == "submit" and publish:
+            with open("posted_ids.json", "w", encoding="utf-8") as f:
+                json.dump([], f, indent=2)
+            print(f"[INFO] Wrote empty posted_ids.json")
+        
+        print(f"[TOURNAMENT MODE: {mode}] Complete. No questions to process.")
         return
     
     # Create .aib-state directory if needed

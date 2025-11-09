@@ -71,6 +71,55 @@ def list_posts_from_tournament(
     return resp.json()
 
 
+def list_posts_from_tournament_all(
+    tournament_id: int | str = None,
+    page_size: int = 50,
+    max_pages: int = 40,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all posts from a Metaculus tournament with pagination.
+    
+    IMPORTANT: The tournament is hardcoded to Fall 2025 AIB ("fall-aib-2025").
+    The tournament_id parameter is ignored and exists only for backward compatibility.
+    
+    Args:
+        tournament_id: IGNORED - kept for backward compatibility only
+        page_size: Number of posts per page (default: 50, max: 100)
+        max_pages: Maximum number of pages to fetch (default: 40)
+    
+    Returns:
+        List of all posts accumulated from all pages
+    """
+    # Always use hardcoded tournament - ignore parameter
+    all_posts = []
+    offset = 0
+    
+    for page_num in range(max_pages):
+        try:
+            data = list_posts_from_tournament(offset=offset, count=page_size)
+            results = data.get("results", [])
+            
+            if not results:
+                # No more results, stop pagination
+                break
+            
+            all_posts.extend(results)
+            
+            # If we got fewer results than requested, we've reached the end
+            if len(results) < page_size:
+                break
+            
+            offset += page_size
+            
+        except RuntimeError as e:
+            # Log error but don't fail completely
+            print(f"[WARN] Pagination failed at offset {offset}: {e}")
+            break
+    
+    print(f"[INFO] Fetched {len(all_posts)} total posts across {page_num + 1} page(s)")
+    return all_posts
+
+
 def get_open_question_ids_from_tournament(
     tournament_id: int | str = None,
 ) -> List[Tuple[int, int]]:
@@ -87,9 +136,10 @@ def get_open_question_ids_from_tournament(
         List of (question_id, post_id) tuples from Fall 2025 AIB tournament
     """
     # Always use hardcoded tournament - ignore parameter
-    posts = list_posts_from_tournament()
+    # Use paginated fetcher to get all posts
+    all_posts = list_posts_from_tournament_all()
     pairs: List[Tuple[int, int]] = []
-    for post in posts.get("results", []):
+    for post in all_posts:
         q = post.get("question")
         if q and q.get("status") == "open":
             pairs.append((q["id"], post["id"]))
