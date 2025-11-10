@@ -1,13 +1,7 @@
 name: Forecast on new AI tournament questions
 
 on:
-  workflow_dispatch:
-    inputs:
-      simulations:
-        description: 'Number of Monte Carlo simulations/worlds to run'
-        required: false
-        default: '200'
-        type: string
+  workflow_dispatch: {}
   schedule:
     - cron: "*/30 * * * *" # runs every 10 minutes
 
@@ -64,17 +58,72 @@ jobs:
           fi
           echo "METACULUS_TOKEN is set, proceeding with tournament run."
       
-      # Step 2: Run bot in tournament mode with configurable simulations
-      - name: Run bot (tournament run)
-        id: tournament_run
+      # Step 2: Fetch open questions and write .aib-state/open_ids.json
+      - name: Fetch open questions
         run: |
-          SIMULATIONS="${{ inputs.simulations || env.WORLDS || '200' }}"
+          poetry run python main.py --mode tournament_dryrun
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      
+      # Step 3: Check for new questions by comparing open_ids vs posted_ids
+      - name: Check for new questions
+        id: check_new
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+          
+          # Load open_ids from .aib-state/open_ids.json (just created by dryrun)
+          try:
+              with open('.aib-state/open_ids.json', 'r') as f:
+                  data = json.load(f)
+                  # Handle both list of dicts and list of ints
+                  if data and isinstance(data[0], dict):
+                      open_ids = set(item['question_id'] for item in data)
+                  else:
+                      open_ids = set(data)
+          except:
+              open_ids = set()
+          
+          # Load posted_ids from .aib-state/posted_ids.json (restored from cache)
+          try:
+              with open('.aib-state/posted_ids.json', 'r') as f:
+                  posted_ids = set(json.load(f))
+          except:
+              posted_ids = set()
+          
+          # Check if there are new questions
+          new_questions = open_ids - posted_ids
+          should_submit = 'true' if new_questions else 'false'
+          
+          print(f"Open questions: {len(open_ids)}")
+          print(f"Posted questions: {len(posted_ids)}")
+          print(f"New questions: {len(new_questions)}")
+          print(f"Should submit: {should_submit}")
+          
+          # Set output for next step
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"should_submit={should_submit}\n")
+          PYEOF
+      
+      # Step 4: Run bot in tournament mode with N_WORLDS_TOURNAMENT
+      - name: Run bot (tournament submit)
+        id: tournament_run
+        if: steps.check_new.outputs.should_submit == 'true'
+        run: |
+          # Fail fast if N_WORLDS_TOURNAMENT is not set
+          if [ -z "${{ env.N_WORLDS_TOURNAMENT }}" ]; then
+            echo "Error: N_WORLDS_TOURNAMENT environment variable is not set."
+            echo "Please set N_WORLDS_TOURNAMENT in repository variables."
+            exit 1
+          fi
           echo "[MODE] tournament_submit"
-          echo "[SIMULATIONS] Running with ${SIMULATIONS} worlds"
-          poetry run python main.py --mode tournament_submit --worlds ${SIMULATIONS}
+          echo "[WORLDS] Running with N_WORLDS_TOURNAMENT=${N_WORLDS_TOURNAMENT}"
+          poetry run python main.py --mode tournament_submit --worlds "${N_WORLDS_TOURNAMENT}"
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
+          N_WORLDS_TOURNAMENT: ${{ vars.N_WORLDS_TOURNAMENT || '100' }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -87,8 +136,9 @@ jobs:
           METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
           METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
       
-      # Step 3: Update state cache
+      # Step 5: Update state cache
       - name: Update state cache
+        if: steps.check_new.outputs.should_submit == 'true'
         run: |
           # Merge posted_ids.json into .aib-state/posted_ids.json
           python3 - <<'PYEOF'
@@ -120,28 +170,28 @@ jobs:
       
       # Upload artifacts
       - name: Upload MC results
-        if: always()
+        if: hashFiles('mc_results.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-results
           path: mc_results.json
       
       - name: Upload MC reasons
-        if: always()
+        if: hashFiles('mc_reasons.txt') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-reasons
           path: mc_reasons.txt
       
       - name: Upload open IDs
-        if: always()
+        if: hashFiles('.aib-state/open_ids.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: open-ids
           path: .aib-state/open_ids.json
       
       - name: Upload posted IDs
-        if: always()
+        if: hashFiles('posted_ids.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: posted-ids

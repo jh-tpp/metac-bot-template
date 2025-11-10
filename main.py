@@ -46,7 +46,7 @@ from metaculus_posts import (
 )
 
 # ========== Constants ==========
-N_WORLDS_DEFAULT = 100  # for tests
+N_WORLDS_TEST = 100  # for tests
 N_WORLDS_TOURNAMENT = 100  # flip to this for production
 ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
@@ -2216,7 +2216,7 @@ def run_live_test():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2263,10 +2263,10 @@ def run_submit_smoke_test(test_qid, publish=False, n_worlds=None):
     Args:
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST)
     """
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TEST
     
     print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish}, worlds={n_worlds})...", flush=True)
     
@@ -2490,7 +2490,7 @@ def run_test_mode():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2548,19 +2548,8 @@ def tournament_dryrun(tournament_slug: str = None):
     
     # Handle zero questions gracefully
     if not pairs:
-        print(f"[INFO] No open questions in tournament {actual_tournament}; wrote empty artifacts and exiting gracefully.")
-        
-        # Write empty mc_results.json with summary structure
-        summary = {
-            "results": [],
-            "count": 0,
-            "tournament": actual_tournament,
-            "status": "dryrun_empty"
-        }
-        with open("mc_results.json", "w") as f:
-            json.dump(summary, f, indent=2)
-        print(f"[INFO] Wrote empty mc_results.json")
-        
+        print(f"[INFO] No open questions in tournament {actual_tournament}; exiting gracefully.")
+        print(f"[INFO] No mc_results.json written (no open questions)")
         print(f"[TOURNAMENT DRYRUN] Complete. No questions to process.")
         return
     
@@ -2601,16 +2590,24 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
         mode: "dryrun" or "submit"
         publish: If True, actually submit forecasts
         force: If True, ignore posted_ids.json and forecast on all questions
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST)
     
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
     # Use provided n_worlds or default
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TEST
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
     print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force}, worlds={n_worlds})")
+    
+    # Ensure .aib-state directory and posted_ids.json exist at start of tournament run
+    _ensure_state_dir()
+    posted_ids_file = AIB_STATE_DIR / "posted_ids.json"
+    if not posted_ids_file.exists():
+        with open(posted_ids_file, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Created empty {posted_ids_file}")
     
     # Load posted IDs unless force=True
     posted_ids = set()
@@ -2636,23 +2633,14 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump([], f, indent=2)
         print(f"[INFO] Wrote empty {open_ids_file}")
         
-        # Write empty mc_results.json with summary structure
-        summary = {
-            "results": [],
-            "count": 0,
-            "tournament": FALL_2025_AIB_TOURNAMENT,
-            "status": f"{mode}_empty"
-        }
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Wrote empty mc_results.json")
-        
+        # Do NOT write mc_results.json when there are no open questions
         # Write empty posted_ids.json in submit mode
         if mode == "submit" and publish:
             with open("posted_ids.json", "w", encoding="utf-8") as f:
                 json.dump([], f, indent=2)
             print(f"[INFO] Wrote empty posted_ids.json")
         
+        print(f"[INFO] No mc_results.json written (no open questions)")
         print(f"[TOURNAMENT MODE: {mode}] Complete. No questions to process.")
         return
     
@@ -2681,14 +2669,14 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     
     if not questions_to_process:
         print(f"[INFO] No new questions to process")
-        # Still write artifacts
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2, ensure_ascii=False)
+        # Do NOT write mc_results.json when there are no questions to process
+        # Only write mc_reasons.txt (empty) and posted_ids.json if needed
         with open("mc_reasons.txt", "w", encoding="utf-8") as f:
             f.write("")
         if mode == "submit" and publish:
             with open("posted_ids.json", "w", encoding="utf-8") as f:
                 json.dump([], f, indent=2)
+        print(f"[INFO] No mc_results.json written (no questions processed)")
         return
     
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions_to_process}
@@ -2756,9 +2744,13 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump(posted_ids_this_run, f, indent=2)
         print(f"[INFO] Wrote {len(posted_ids_this_run)} posted question IDs to posted_ids.json")
     
-    # Write artifacts
-    with open("mc_results.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    # Write artifacts - only write mc_results.json if results list is non-empty
+    if all_results:
+        with open("mc_results.json", "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] Wrote mc_results.json with {len(all_results)} results")
+    else:
+        print(f"[INFO] No results to write, skipping mc_results.json")
     
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_reasons))
@@ -2794,7 +2786,7 @@ def main():
         "--worlds",
         type=int,
         metavar="N",
-        help="Number of MC worlds to generate (default: N_WORLDS_DEFAULT)"
+        help="Number of MC worlds to generate (default: N_WORLDS_TEST)"
     )
     parser.add_argument(
         "--publish",
