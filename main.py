@@ -2781,14 +2781,18 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump(posted_ids_this_run, f, indent=2)
         print(f"[INFO] Wrote {len(posted_ids_this_run)} posted question IDs to posted_ids.json")
     
-    # Write artifacts
-    with open("mc_results.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
-    
-    with open("mc_reasons.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(all_reasons))
-    
-    print(f"[TOURNAMENT MODE: {mode}] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+    # Write artifacts only if we have results
+    if all_results:
+        with open("mc_results.json", "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
+        
+        with open("mc_reasons.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(all_reasons))
+        
+        print(f"[TOURNAMENT MODE: {mode}] Complete. Artifacts: mc_results.json, mc_reasons.txt")
+    else:
+        print(f"[TOURNAMENT MODE: {mode}] Complete. No results to write (all questions failed or skipped)")
+
 
 # ========== Main CLI ==========
 def main():

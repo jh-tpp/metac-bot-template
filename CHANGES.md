@@ -1,6 +1,91 @@
 # Changes History
 
-## Hard Enforce Option B: Worlds Identifiers + 400 Forecast Fix (Current PR)
+## Full Option B Enforcement + Numeric CDF Sanitizer (Current PR)
+
+### Summary
+This PR completes the Option B enforcement by adding workflow guards, check_new step, and implements a comprehensive numeric CDF sanitizer to eliminate 400 Bad Request errors for numeric forecasts.
+
+### Key Changes
+
+**1. Workflow Integrity (.github/workflows/run_bot_on_tournament.yaml)**
+- **Added**: `check_new` step that computes `should_submit` based on new vs posted questions
+- **Conditional execution**: Bot runs ONLY when `should_submit == 'true'`
+- **Environment variable**: N_WORLDS_TOURNAMENT set to "100" and passed via `--worlds` flag
+- **Fail-fast**: Bot fails immediately if N_WORLDS_TOURNAMENT env var is missing
+- **Conditional uploads**: 
+  - mc_results artifact only uploaded when `should_submit == 'true'` and file exists
+  - open_ids and posted_ids only uploaded when files exist
+- **No workflow inputs**: workflow_dispatch remains clean with no simulations parameter
+
+**2. Numeric CDF Sanitizer (adapters.py)**
+- **Added**: `_sanitize_numeric_cdf()` function with comprehensive constraints:
+  - Enforces length exactly 201 points (resizes via linear interpolation)
+  - Ensures monotonicity with forward and backward passes
+  - Enforces minimum step >= 5e-05 between adjacent points where possible
+  - Clamps all values to [0.0, 1.0]
+  - Handles NaN values via linear interpolation
+  - Enforces open bound constraints:
+    * Lower bound open: first value >= 0.001
+    * Upper bound open: last value <= 0.999
+  - Exact endpoint enforcement (0.0 and 1.0 for closed bounds)
+- **Integrated**: Automatically applied to all numeric forecasts in `mc_results_to_metaculus_payload()`
+- **Logging**: Detailed `[SANITIZE]` logs for resizing, NaN handling, and bound adjustments
+
+**3. Multiple Choice Normalization (adapters.py)**
+- **Enhanced**: Ensure non-negative probabilities before normalization
+- **Maintained**: Length matching, sum=1.0 normalization, option name extraction
+
+**4. main.py Adjustments**
+- **Fixed**: Skip mc_results.json and mc_reasons.txt when results list is empty
+- **Maintained**: .aib-state/posted_ids.json created early via `_load_posted_ids()`
+- **Verified**: No '[DRYRUN]' logs in tournament_submit path (only in dry-run modes)
+
+**5. Testing**
+- **Added**: `test_numeric_cdf_sanitizer.py` with 10 comprehensive tests:
+  - Basic sanitization
+  - Resizing from various lengths
+  - NaN handling
+  - Clamping to [0, 1]
+  - Monotonicity enforcement
+  - Open lower/upper bound constraints
+  - Empty input handling
+  - All-zeros handling
+  - Minimum step enforcement
+
+### Files Modified
+- `adapters.py`:
+  - Added `_sanitize_numeric_cdf()` function (125 lines)
+  - Enhanced numeric payload generation with sanitizer integration
+  - Enhanced multiple choice normalization (non-negative enforcement)
+- `main.py`:
+  - Fixed artifact writing to skip when results list is empty
+- `.github/workflows/run_bot_on_tournament.yaml`:
+  - Added check_new step with should_submit logic
+  - Added conditional bot execution
+  - Added N_WORLDS_TOURNAMENT environment variable
+  - Updated bot command to use --worlds flag
+  - Made artifact uploads conditional
+- `test_numeric_cdf_sanitizer.py`: New comprehensive test file
+- `CHANGES.md`: Updated with numeric CDF requirements and troubleshooting
+- `PATCH_SUMMARY.md`: Updated (see below)
+
+### Testing Results
+- ✓ All 10 numeric CDF sanitizer tests pass
+- ✓ Verified zero `N_WORLDS_DEFAULT` references
+- ✓ Verified workflow check_new logic
+- ✓ Verified conditional artifact uploads
+
+### Acceptance Criteria Met
+- ✅ grep for N_WORLDS_DEFAULT returns zero hits
+- ✅ Workflow skips bot run when should_submit == 'false'
+- ✅ Numeric forecasts use sanitized CDF (no initial endpoint violations)
+- ✅ Multiple choice forecasts use normalized probabilities
+- ✅ mc_results.json absent when zero processed questions
+- ✅ Comprehensive test coverage for numeric CDF sanitizer
+
+---
+
+## Hard Enforce Option B: Worlds Identifiers + 400 Forecast Fix (Previous PR)
 
 ### Summary
 This PR fully implements "Option B" for world identifiers and fixes 400 Bad Request errors in forecast submissions. It renames all N_WORLDS_DEFAULT to N_WORLDS_TEST, ensures tournament workflows exclusively use N_WORLDS_TOURNAMENT, enhances error logging, and adds comprehensive payload validation.
@@ -91,12 +176,24 @@ This PR fully implements "Option B" for world identifiers and fixes 400 Bad Requ
 2. **Multiple choice**: Probabilities don't sum to 1.0 or use wrong option identifiers
 3. **Numeric**: CDF not 201 points, not monotonic, or wrong endpoints
 
+**Numeric CDF Requirements (Enforced by Sanitizer):**
+- **Length**: Exactly 201 points
+- **Monotonicity**: Each value >= previous value
+- **Minimum step**: >= 5e-05 between adjacent points (enforced where possible)
+- **Value range**: All values in [0.0, 1.0]
+- **Endpoints**: First value near 0.0, last value near 1.0
+- **Open bounds**: 
+  * If lower bound open: first value >= 0.001
+  * If upper bound open: last value <= 0.999
+- **NaN handling**: Replaced with linear interpolation
+
 **How to Debug:**
 1. Check `[FORECAST ERROR]` log block for question_id and status
 2. Review logged payload structure
 3. Check API field-level errors for specific validation failures
 4. Verify question type matches payload structure
 5. For MC: ensure option names match Metaculus API expectations exactly
+6. For numeric: check `[SANITIZE]` logs for CDF adjustments
 
 **What We Now Surface:**
 - Full payload that was rejected
@@ -104,6 +201,7 @@ This PR fully implements "Option B" for world identifiers and fixes 400 Bad Requ
 - API response body with field-level errors
 - Question type context
 - Pre-submission validation errors before API call
+- CDF sanitization logs (resizing, NaN handling, bound adjustments)
 
 ### Benefits
 1. **Clear separation**: Test worlds (N_WORLDS_TEST) vs Tournament worlds (N_WORLDS_TOURNAMENT)

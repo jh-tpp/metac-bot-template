@@ -1,7 +1,81 @@
 # Corrective Patch Summary
 
 ## Overview
-This patch addresses multiple API integration issues with Metaculus by implementing the official template approach, adding robust error handling, and enforcing "Option B" for world identifiers to prevent configuration errors.
+This patch completes Option B enforcement by adding workflow guards and a comprehensive numeric CDF sanitizer to eliminate 400 Bad Request errors. It ensures tournament workflows run only when there are new questions, enforces strict numeric CDF constraints, and maintains complete traceability.
+
+## Problems Fixed
+
+### 0c. Numeric CDF 400 Errors for Open Bounds
+**Symptom**: Numeric forecasts rejected with 400 status, especially for questions like Q40221
+**Root Cause**: CDF not meeting Metaculus API requirements (length, monotonicity, open bound constraints)
+**Fix**:
+- Added `_sanitize_numeric_cdf()` function in adapters.py with:
+  - Length enforcement: exactly 201 points via linear interpolation
+  - Monotonicity: forward and backward passes to ensure strict increasing
+  - Minimum step: >= 5e-05 between adjacent points where possible
+  - Value clamping: all values in [0.0, 1.0]
+  - NaN handling: linear interpolation replacement
+  - Open bound constraints:
+    * Lower bound open: first value >= 0.001
+    * Upper bound open: last value <= 0.999
+  - Exact endpoint enforcement
+- Integrated sanitizer into all numeric forecast payload generation
+- Added comprehensive test suite (10 tests) in test_numeric_cdf_sanitizer.py
+- Enhanced logging with `[SANITIZE]` messages for debugging
+
+### 0d. Workflow Inefficiency and Missing Guards
+**Symptom**: Workflow runs even when no new questions exist
+**Root Cause**: No check for new questions before running bot
+**Fix**:
+- Added `check_new` step in .github/workflows/run_bot_on_tournament.yaml:
+  - Computes should_submit based on new vs posted questions
+  - Bot runs ONLY when should_submit == 'true'
+  - Fails fast if N_WORLDS_TOURNAMENT env var missing
+- Made bot execution and state cache update conditional on should_submit
+- Guarded artifact uploads:
+  - mc_results only when should_submit == 'true' AND file exists
+  - open_ids and posted_ids only when files exist
+- Set N_WORLDS_TOURNAMENT="100" in workflow environment
+- Updated bot command to use `--worlds "${N_WORLDS_TOURNAMENT}"`
+
+### 0e. Empty Results Artifact Creation
+**Symptom**: mc_results.json written even when all questions fail/skip
+**Root Cause**: No check for empty results list before writing artifacts
+**Fix**:
+- Added conditional in run_tournament() to skip mc_results.json and mc_reasons.txt when results list is empty
+- Maintains proper workflow compatibility with posted_ids.json
+
+## Files Modified
+
+### Modified Files
+1. **adapters.py** (~200 lines total, ~130 new)
+   - Added `_sanitize_numeric_cdf()` with comprehensive numeric CDF sanitization
+   - Enhanced numeric payload generation with automatic sanitizer integration  
+   - Enhanced multiple choice normalization (non-negative enforcement)
+   - Maintained all existing error logging
+
+2. **main.py** (~2910 lines total, ~5 changed)
+   - Fixed run_tournament() to skip artifacts when results list empty
+   - Maintained early .aib-state/posted_ids.json creation
+   - No DRYRUN logs in production paths
+
+3. **.github/workflows/run_bot_on_tournament.yaml** (~220 lines total, ~70 changed)
+   - Added check_new step with should_submit computation
+   - Made bot execution conditional on should_submit
+   - Added N_WORLDS_TOURNAMENT environment variable
+   - Updated bot command to use --worlds flag
+   - Made artifact uploads conditional
+
+4. **CHANGES.md** (~170 lines total, ~70 new)
+   - Added comprehensive numeric CDF requirements documentation
+   - Enhanced troubleshooting section with sanitizer details
+   - Added new PR section for current changes
+
+### Created Files
+1. **test_numeric_cdf_sanitizer.py** (214 lines)
+   - 10 comprehensive tests for numeric CDF sanitizer
+   - Tests: basic sanitization, resizing, NaN handling, clamping, monotonicity, open bounds, edge cases
+   - All tests passing
 
 ## Problems Fixed
 
