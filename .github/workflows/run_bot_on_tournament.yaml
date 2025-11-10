@@ -1,13 +1,7 @@
 name: Forecast on new AI tournament questions
 
 on:
-  workflow_dispatch:
-    inputs:
-      simulations:
-        description: 'Number of Monte Carlo simulations/worlds to run'
-        required: false
-        default: '200'
-        type: string
+  workflow_dispatch: {}
   schedule:
     - cron: "*/30 * * * *" # runs every 10 minutes
 
@@ -64,14 +58,56 @@ jobs:
           fi
           echo "METACULUS_TOKEN is set, proceeding with tournament run."
       
-      # Step 2: Run bot in tournament mode with configurable simulations
+      # Step 2: Check if there are new questions to process
+      - name: Check for new questions
+        id: check_new
+        run: |
+          # Compare open_ids.json and posted_ids.json to determine if we should run
+          python3 - <<'PYEOF'
+          import json
+          import os
+          
+          # Load open IDs (from cache)
+          try:
+              with open('.aib-state/open_ids.json', 'r') as f:
+                  open_ids = set(item['question_id'] if isinstance(item, dict) else item for item in json.load(f))
+          except:
+              open_ids = set()
+          
+          # Load posted IDs (from cache)
+          try:
+              with open('.aib-state/posted_ids.json', 'r') as f:
+                  posted_ids = set(json.load(f))
+          except:
+              posted_ids = set()
+          
+          # Determine if there are new questions
+          new_questions = open_ids - posted_ids
+          should_submit = 'true' if len(new_questions) > 0 else 'false'
+          
+          print(f"Open questions: {len(open_ids)}")
+          print(f"Posted questions: {len(posted_ids)}")
+          print(f"New questions: {len(new_questions)}")
+          print(f"Should submit: {should_submit}")
+          
+          # Set output for next steps
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"should_submit={should_submit}\n")
+          PYEOF
+      
+      # Step 3: Run bot in tournament mode
       - name: Run bot (tournament run)
         id: tournament_run
+        if: steps.check_new.outputs.should_submit == 'true'
         run: |
-          SIMULATIONS="${{ inputs.simulations || env.WORLDS || '200' }}"
+          if [ -z "${{ vars.N_WORLDS_TOURNAMENT }}" ]; then
+            echo "Error: N_WORLDS_TOURNAMENT is not set. Cannot run tournament mode."
+            echo "Please set N_WORLDS_TOURNAMENT in repository variables."
+            exit 1
+          fi
           echo "[MODE] tournament_submit"
-          echo "[SIMULATIONS] Running with ${SIMULATIONS} worlds"
-          poetry run python main.py --mode tournament_submit --worlds ${SIMULATIONS}
+          echo "[WORLDS] Running with ${{ vars.N_WORLDS_TOURNAMENT }} worlds"
+          poetry run python main.py --mode tournament_submit --worlds "${{ vars.N_WORLDS_TOURNAMENT }}"
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -87,7 +123,7 @@ jobs:
           METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
           METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
       
-      # Step 3: Update state cache
+      # Step 4: Update state cache
       - name: Update state cache
         run: |
           # Merge posted_ids.json into .aib-state/posted_ids.json
@@ -120,35 +156,35 @@ jobs:
       
       # Upload artifacts
       - name: Upload MC results
-        if: always()
+        if: steps.check_new.outputs.should_submit == 'true' && hashFiles('mc_results.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-results
           path: mc_results.json
       
       - name: Upload MC reasons
-        if: always()
+        if: steps.check_new.outputs.should_submit == 'true' && hashFiles('mc_reasons.txt') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-reasons
           path: mc_reasons.txt
       
       - name: Upload open IDs
-        if: always()
+        if: steps.check_new.outputs.should_submit == 'true' && hashFiles('.aib-state/open_ids.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: open-ids
           path: .aib-state/open_ids.json
       
       - name: Upload posted IDs
-        if: always()
+        if: steps.check_new.outputs.should_submit == 'true' && hashFiles('posted_ids.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: posted-ids
           path: posted_ids.json
       
       - name: Upload diagnostic traces
-        if: always()
+        if: steps.check_new.outputs.should_submit == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: trace
