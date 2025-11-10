@@ -1,9 +1,32 @@
 # Corrective Patch Summary
 
 ## Overview
-This patch addresses multiple API integration issues with Metaculus by implementing the official template approach and adding robust error handling.
+This patch addresses multiple API integration issues with Metaculus by implementing the official template approach, adding robust error handling, and enforcing "Option B" for world identifiers to prevent configuration errors.
 
 ## Problems Fixed
+
+### 0. Option B Enforcement: N_WORLDS_DEFAULT → N_WORLDS_TEST
+**Symptom**: Ambiguous world identifier usage and potential configuration errors
+**Root Cause**: Mixed use of N_WORLDS_DEFAULT for both test and tournament contexts
+**Fix**:
+- Renamed all `N_WORLDS_DEFAULT` → `N_WORLDS_TEST` globally (6 occurrences in main.py, 1 in test file)
+- Tournament mode now exclusively uses `N_WORLDS_TOURNAMENT` (not overridable via workflow inputs)
+- Removed `simulations` input parameter from tournament workflow
+- Test/smoke paths use `N_WORLDS_TEST`, tournament paths use `N_WORLDS_TOURNAMENT`
+- Zero lingering references verified via grep
+
+### 0b. 400 Bad Request Forecast Submission Errors
+**Symptom**: Forecasts rejected with 400 status, unclear error reasons
+**Root Cause**: Invalid payload structure or values not caught before submission
+**Fix**:
+- Added `_validate_payload_before_submit()` with type-specific validation:
+  - Binary: validates probability_yes in [0.01, 0.99]
+  - Multiple choice: validates probabilities sum to 1.0, option names correct
+  - Numeric: validates 201-point CDF, monotonicity, endpoints
+- Enhanced `submit_forecast()` error logging with structured `[FORECAST ERROR]` blocks
+- Enhanced `post_forecast_safe()` to extract and display field-level API errors
+- Fixed `mc_results_to_metaculus_payload()` to correctly extract option names from dicts
+- No automatic retries on 400 (fail gracefully and continue to next question)
 
 ### 1. 403 Forbidden Errors
 **Symptom**: `/api/questions/{id}/` returns 403 during smoke tests

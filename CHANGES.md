@@ -1,6 +1,121 @@
 # Changes History
 
-## Hardcode Fall 2025 AIB Tournament (Current PR)
+## Hard Enforce Option B: Worlds Identifiers + 400 Forecast Fix (Current PR)
+
+### Summary
+This PR fully implements "Option B" for world identifiers and fixes 400 Bad Request errors in forecast submissions. It renames all N_WORLDS_DEFAULT to N_WORLDS_TEST, ensures tournament workflows exclusively use N_WORLDS_TOURNAMENT, enhances error logging, and adds comprehensive payload validation.
+
+### Key Changes
+
+**1. Identifier Rename (Global)**
+- **Renamed**: `N_WORLDS_DEFAULT` → `N_WORLDS_TEST` (100 worlds for test/smoke paths)
+- **Updated locations**:
+  - `main.py`: Constant definition and 6 function references
+  - `test_submit_single_question.py`: Help text
+  - All test/smoke test functions now use `N_WORLDS_TEST`
+  - Tournament mode defaults to `N_WORLDS_TOURNAMENT` (not overridable)
+- **Verified**: Zero lingering `N_WORLDS_DEFAULT` references via grep
+
+**2. Tournament Workflow Integrity**
+- **Removed**: `simulations` workflow input parameter (no longer configurable)
+- **Enforced**: Tournament runs ONLY use `N_WORLDS_TOURNAMENT` (hardcoded in main.py)
+- **Updated**: `.github/workflows/run_bot_on_tournament.yaml` to remove simulation selection logic
+- **Fixed**: `mc_results.json` and `mc_reasons.txt` NOT created when zero new questions
+- **Conditional upload**: Artifacts only uploaded when files exist
+
+**3. main.py Adjustments**
+- **Test paths**: All use `N_WORLDS_TEST` (run_live_test, run_submit_smoke_test, run_test_mode)
+- **Tournament paths**: All use `N_WORLDS_TOURNAMENT` (run_tournament default)
+- **State management**: `.aib-state/posted_ids.json` created early and idempotently via `_load_posted_ids()`
+- **Empty handling**: Skip artifact creation when no new questions to process
+
+**4. Forecast Submission 400 Error Fix**
+- **Added**: `_validate_payload_before_submit()` function in `adapters.py`
+  - Binary: validates `probability_yes` in [0.01, 0.99]
+  - Multiple choice: validates dict structure, probabilities sum to 1.0, all in [0, 1]
+  - Numeric: validates 201-point CDF, monotonicity, endpoints at 0.0/1.0
+- **Enhanced**: `submit_forecast()` error logging with structured `[FORECAST ERROR]` blocks
+  - Logs question_id, status, payload, and API response
+  - Extracts field-level validation errors from API response JSON
+  - No automatic retries on 400 (fail gracefully and continue)
+- **Enhanced**: `post_forecast_safe()` error handling
+  - Separate catch for HTTPError with detailed field-level error extraction
+  - Logs question type and full context for debugging
+
+**5. Adapters Consistency**
+- **Fixed**: `mc_results_to_metaculus_payload()` multiple choice handling
+  - Correctly extracts option names from dict objects (`{"name": "..."}`)
+  - Handles both dict and string option formats
+  - Maps probabilities to option names (not dict objects)
+- **Verified**: All question types return correct payload structure:
+  - Binary: `probability_yes` only
+  - Multiple choice: `probability_yes_per_category` dict only
+  - Numeric: `continuous_cdf` list only
+
+**6. Error Visibility**
+- **Added**: Comprehensive error context in all submission failures
+  - Question type included in error messages
+  - Full payload logged for debugging
+  - API field-level errors extracted and displayed
+  - Structured format: `[FORECAST ERROR] Q{id} HTTP {status}`
+
+### Files Modified
+- `main.py`:
+  - Renamed constant: `N_WORLDS_DEFAULT` → `N_WORLDS_TEST`
+  - Updated 6 function references to use correct identifier
+  - Enhanced `_load_posted_ids()` for idempotent creation
+  - Enhanced `post_forecast_safe()` error handling
+  - Fixed empty question handling (skip artifact creation)
+- `adapters.py`:
+  - Added `_validate_payload_before_submit()` function
+  - Enhanced `submit_forecast()` with validation and error logging
+  - Fixed `mc_results_to_metaculus_payload()` option name extraction
+- `test_submit_single_question.py`:
+  - Updated help text reference
+- `.github/workflows/run_bot_on_tournament.yaml`:
+  - Removed `simulations` input parameter
+  - Removed `--worlds` CLI argument (uses hardcoded value)
+  - Added conditional artifact upload (only when files exist)
+
+### Testing
+- ✓ Verified zero `N_WORLDS_DEFAULT` references via grep
+- ✓ All test/smoke paths use `N_WORLDS_TEST`
+- ✓ Tournament path uses `N_WORLDS_TOURNAMENT`
+- ✓ Payload validation catches common errors before submission
+- ✓ Error messages include full context for debugging
+
+### Troubleshooting 400 Errors
+
+**Common Causes:**
+1. **Binary**: `probability_yes` outside [0.01, 0.99]
+2. **Multiple choice**: Probabilities don't sum to 1.0 or use wrong option identifiers
+3. **Numeric**: CDF not 201 points, not monotonic, or wrong endpoints
+
+**How to Debug:**
+1. Check `[FORECAST ERROR]` log block for question_id and status
+2. Review logged payload structure
+3. Check API field-level errors for specific validation failures
+4. Verify question type matches payload structure
+5. For MC: ensure option names match Metaculus API expectations exactly
+
+**What We Now Surface:**
+- Full payload that was rejected
+- HTTP status code and reason
+- API response body with field-level errors
+- Question type context
+- Pre-submission validation errors before API call
+
+### Benefits
+1. **Clear separation**: Test worlds (N_WORLDS_TEST) vs Tournament worlds (N_WORLDS_TOURNAMENT)
+2. **No accidental overrides**: Tournament runs cannot be misconfigured via workflow inputs
+3. **Better error visibility**: 400 errors now show exactly why submission failed
+4. **Early validation**: Catch common errors before API submission
+5. **Idempotent state**: `.aib-state/posted_ids.json` always exists
+6. **Clean artifacts**: No empty mc_results.json files when nothing to process
+
+---
+
+## Hardcode Fall 2025 AIB Tournament
 
 ### Summary
 This PR enforces the use of the Fall 2025 AI Benchmarking tournament (`fall-aib-2025`) by hardcoding the tournament identifier throughout the codebase. This prevents accidental environment variable overrides that could cause incorrect tournament IDs (e.g., 3512) to be used in production.

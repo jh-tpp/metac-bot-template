@@ -2030,8 +2030,35 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, tr
             print(f"[INFO] Added Q{qid} to .aib-state/posted_ids.json")
         
         return True
+    except requests.exceptions.HTTPError as e:
+        # Enhanced error logging for HTTP errors
+        status = getattr(e.response, "status_code", "N/A")
+        
+        error_msg = f"[FORECAST ERROR] Q{qid} HTTP {status}\n"
+        error_msg += f"  Question type: {question_obj.get('type', 'unknown')}\n"
+        error_msg += f"  Payload: {payload}\n"
+        
+        # Try to extract detailed error from response
+        try:
+            error_body = e.response.json()
+            error_msg += f"  API response: {error_body}\n"
+            
+            # Extract field-level errors if present
+            if isinstance(error_body, dict):
+                for field, messages in error_body.items():
+                    if isinstance(messages, list):
+                        error_msg += f"  → field '{field}': {', '.join(str(m) for m in messages)}\n"
+                    else:
+                        error_msg += f"  → field '{field}': {messages}\n"
+        except Exception:
+            error_body = getattr(e.response, "text", str(e))[:500]
+            error_msg += f"  Response text (truncated): {error_body}\n"
+        
+        print(error_msg, flush=True)
+        return False
     except Exception as e:
         print(f"[ERROR] Failed to post Q{qid}: {e}")
+        traceback.print_exc()
         return False
 
 # ========== Live Test & Smoke Test Helpers ==========
