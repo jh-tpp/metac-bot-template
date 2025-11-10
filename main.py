@@ -46,7 +46,7 @@ from metaculus_posts import (
 )
 
 # ========== Constants ==========
-N_WORLDS_DEFAULT = 100  # for tests
+N_WORLDS_TEST = 100  # for tests
 N_WORLDS_TOURNAMENT = 100  # flip to this for production
 ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
@@ -2216,7 +2216,7 @@ def run_live_test():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2263,10 +2263,10 @@ def run_submit_smoke_test(test_qid, publish=False, n_worlds=None):
     Args:
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST)
     """
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TEST
     
     print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish}, worlds={n_worlds})...", flush=True)
     
@@ -2490,7 +2490,7 @@ def run_test_mode():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2534,10 +2534,18 @@ def tournament_dryrun(tournament_slug: str = None):
     
     Writes:
         - .aib-state/open_ids.json: List of {question_id, post_id} dicts
-        - mc_results.json: Dryrun results with question metadata
+        - mc_results.json: Dryrun results with question metadata (only if non-empty)
     """
     # Always use hardcoded tournament - ignore parameter
     actual_tournament = FALL_2025_AIB_TOURNAMENT
+    
+    # Ensure .aib-state directory and posted_ids.json exist at start
+    _ensure_state_dir()
+    posted_ids_path = AIB_STATE_DIR / "posted_ids.json"
+    if not posted_ids_path.exists():
+        with open(posted_ids_path, "w") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Created empty {posted_ids_path}")
     
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {actual_tournament}")
@@ -2548,21 +2556,19 @@ def tournament_dryrun(tournament_slug: str = None):
     
     # Handle zero questions gracefully
     if not pairs:
-        print(f"[INFO] No open questions in tournament {actual_tournament}; wrote empty artifacts and exiting gracefully.")
+        print(f"[INFO] No open questions in tournament {actual_tournament}; writing empty artifacts and exiting gracefully.")
         
-        # Write empty mc_results.json with summary structure
-        summary = {
-            "results": [],
-            "count": 0,
-            "tournament": actual_tournament,
-            "status": "dryrun_empty"
-        }
-        with open("mc_results.json", "w") as f:
-            json.dump(summary, f, indent=2)
-        print(f"[INFO] Wrote empty mc_results.json")
+        # Write empty .aib-state/open_ids.json
+        open_ids_file = AIB_STATE_DIR / "open_ids.json"
+        with open(open_ids_file, "w") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Wrote empty {open_ids_file}")
+        
+        # Do NOT write mc_results.json when results list is empty
+        print(f"[INFO] Skipped mc_results.json (no results to write)")
         
         print(f"[TOURNAMENT DRYRUN] Complete. No questions to process.")
-        return
+        sys.exit(0)
     
     print(f"[INFO] Found {len(pairs)} open questions in tournament")
     
@@ -2583,9 +2589,13 @@ def tournament_dryrun(tournament_slug: str = None):
             "status": "dryrun"
         })
     
-    # Write mc_results.json
-    with open("mc_results.json", "w") as f:
-        json.dump(results, f, indent=2)
+    # Write mc_results.json only when results list is non-empty
+    if results:
+        with open("mc_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"[INFO] Wrote mc_results.json with {len(results)} results")
+    else:
+        print(f"[INFO] Skipped mc_results.json (no results to write)")
     
     print(f"[TOURNAMENT DRYRUN] Complete. Wrote .aib-state/open_ids.json and mc_results.json for {len(pairs)} questions")
 
@@ -2601,13 +2611,22 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
         mode: "dryrun" or "submit"
         publish: If True, actually submit forecasts
         force: If True, ignore posted_ids.json and forecast on all questions
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST)
     
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
     # Use provided n_worlds or default
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TEST
+    
+    # Ensure .aib-state directory and posted_ids.json exist at start of tournament run
+    _ensure_state_dir()
+    posted_ids_path = AIB_STATE_DIR / "posted_ids.json"
+    if not posted_ids_path.exists():
+        with open(posted_ids_path, "w") as f:
+            json.dump([], f, indent=2)
+        print(f"[INFO] Created empty {posted_ids_path}")
+    
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
     print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force}, worlds={n_worlds})")
@@ -2625,10 +2644,7 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     
     # Handle zero questions gracefully
     if not questions:
-        print(f"[INFO] No open questions in tournament {FALL_2025_AIB_TOURNAMENT}; wrote empty artifacts and exiting gracefully.")
-        
-        # Create .aib-state directory if needed
-        AIB_STATE_DIR.mkdir(exist_ok=True)
+        print(f"[INFO] No open questions in tournament {FALL_2025_AIB_TOURNAMENT}; writing empty artifacts and exiting gracefully.")
         
         # Write empty .aib-state/open_ids.json
         open_ids_file = AIB_STATE_DIR / "open_ids.json"
@@ -2636,16 +2652,8 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump([], f, indent=2)
         print(f"[INFO] Wrote empty {open_ids_file}")
         
-        # Write empty mc_results.json with summary structure
-        summary = {
-            "results": [],
-            "count": 0,
-            "tournament": FALL_2025_AIB_TOURNAMENT,
-            "status": f"{mode}_empty"
-        }
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Wrote empty mc_results.json")
+        # Do NOT write mc_results.json when results list is empty (per requirements)
+        print(f"[INFO] Skipped mc_results.json (no results to write)")
         
         # Write empty posted_ids.json in submit mode
         if mode == "submit" and publish:
@@ -2654,10 +2662,7 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             print(f"[INFO] Wrote empty posted_ids.json")
         
         print(f"[TOURNAMENT MODE: {mode}] Complete. No questions to process.")
-        return
-    
-    # Create .aib-state directory if needed
-    AIB_STATE_DIR.mkdir(exist_ok=True)
+        sys.exit(0)
     
     # Write .aib-state/open_ids.json (always, per requirements)
     open_ids = [q["id"] for q in questions]
@@ -2681,9 +2686,8 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     
     if not questions_to_process:
         print(f"[INFO] No new questions to process")
-        # Still write artifacts
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2, ensure_ascii=False)
+        # Do NOT write mc_results.json when results list is empty
+        print(f"[INFO] Skipped mc_results.json (no results to write)")
         with open("mc_reasons.txt", "w", encoding="utf-8") as f:
             f.write("")
         if mode == "submit" and publish:
@@ -2756,9 +2760,13 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump(posted_ids_this_run, f, indent=2)
         print(f"[INFO] Wrote {len(posted_ids_this_run)} posted question IDs to posted_ids.json")
     
-    # Write artifacts
-    with open("mc_results.json", "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    # Write artifacts only when results list is non-empty
+    if all_results:
+        with open("mc_results.json", "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] Wrote mc_results.json with {len(all_results)} results")
+    else:
+        print(f"[INFO] Skipped mc_results.json (no results to write)")
     
     with open("mc_reasons.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_reasons))
@@ -2794,7 +2802,7 @@ def main():
         "--worlds",
         type=int,
         metavar="N",
-        help="Number of MC worlds to generate (default: N_WORLDS_DEFAULT)"
+        help="Number of MC worlds to generate (default: N_WORLDS_TEST)"
     )
     parser.add_argument(
         "--publish",
