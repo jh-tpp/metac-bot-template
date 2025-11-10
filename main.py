@@ -46,7 +46,7 @@ from metaculus_posts import (
 )
 
 # ========== Constants ==========
-N_WORLDS_DEFAULT = 3  # for tests
+N_WORLDS_DEFAULT = 100  # for tests
 N_WORLDS_TOURNAMENT = 100  # flip to this for production
 ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
