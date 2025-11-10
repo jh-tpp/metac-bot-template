@@ -2,14 +2,8 @@ name: Forecast on new AI tournament questions
 
 on:
   workflow_dispatch:
-    inputs:
-      simulations:
-        description: 'Number of Monte Carlo simulations/worlds to run'
-        required: false
-        default: '100'
-        type: string
   schedule:
-    - cron: "*/20 * * * *" # runs every 10 minutes
+    - cron: "*/20 * * * *" # runs every 20 minutes
 
 # Add concurrency group to prevent parallel runs
 concurrency:
@@ -64,14 +58,13 @@ jobs:
           fi
           echo "METACULUS_TOKEN is set, proceeding with tournament run."
       
-      # Step 2: Run bot in tournament mode with configurable simulations
+      # Step 2: Run bot in tournament mode
       - name: Run bot (tournament run)
         id: tournament_run
         run: |
-          SIMULATIONS="${{ inputs.simulations || env.WORLDS || '200' }}"
           echo "[MODE] tournament_submit"
-          echo "[SIMULATIONS] Running with ${SIMULATIONS} worlds"
-          poetry run python main.py --mode tournament_submit --worlds ${SIMULATIONS}
+          echo "[WORLDS] Using N_WORLDS_TOURNAMENT (hardcoded in main.py)"
+          poetry run python main.py --mode tournament_submit
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -120,14 +113,14 @@ jobs:
       
       # Upload artifacts
       - name: Upload MC results
-        if: always()
+        if: always() && hashFiles('mc_results.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-results
           path: mc_results.json
       
       - name: Upload MC reasons
-        if: always()
+        if: always() && hashFiles('mc_reasons.txt') != ''
         uses: actions/upload-artifact@v4
         with:
           name: mc-reasons
