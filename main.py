@@ -2590,7 +2590,7 @@ def tournament_dryrun(tournament_slug: str = None):
     print(f"[TOURNAMENT DRYRUN] Complete. Wrote .aib-state/open_ids.json and mc_results.json for {len(pairs)} questions")
 
 
-def run_tournament(mode="dryrun", publish=False, force=False):
+def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     """
     Fetch tournament questions, run MC, post (if publish=True).
     
@@ -2601,12 +2601,16 @@ def run_tournament(mode="dryrun", publish=False, force=False):
         mode: "dryrun" or "submit"
         publish: If True, actually submit forecasts
         force: If True, ignore posted_ids.json and forecast on all questions
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
     
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
+    # Use provided n_worlds or default
+    if n_worlds is None:
+        n_worlds = N_WORLDS_DEFAULT
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
-    print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force})")
+    print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force}, worlds={n_worlds})")
     
     # Load posted IDs unless force=True
     posted_ids = set()
@@ -2712,7 +2716,7 @@ def run_tournament(mode="dryrun", publish=False, force=False):
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,  # flip to N_WORLDS_TOURNAMENT for production
+            n_worlds=n_worlds,
             return_evidence=True,
             trace=trace
         )
@@ -2851,11 +2855,25 @@ def main():
         if args.mode == "test_questions":
             run_test_mode()
         elif args.mode == "tournament_dryrun":
+            # Use --worlds or WORLDS env var or default
+            worlds = args.worlds
+            if worlds is None and worlds_from_env:
+                try:
+                    worlds = int(worlds_from_env)
+                except ValueError:
+                    parser.error(f"WORLDS environment variable must be a valid integer, got '{worlds_from_env}'")
             tournament_dryrun()
         elif args.mode == "tournament_submit":
             # Use --force or FORCE env var
             force = args.force or _parse_bool_flag(force_from_env, default=False)
-            run_tournament(mode="submit", publish=True, force=force)
+            # Use --worlds or WORLDS env var or default
+            worlds = args.worlds
+            if worlds is None and worlds_from_env:
+                try:
+                    worlds = int(worlds_from_env)
+                except ValueError:
+                    parser.error(f"WORLDS environment variable must be a valid integer, got '{worlds_from_env}'")
+            run_tournament(mode="submit", publish=True, force=force, n_worlds=worlds)
     else:
         parser.error("Must specify either --mode, --live-test, or --submit-smoke-test")
 
