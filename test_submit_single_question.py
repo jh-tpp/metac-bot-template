@@ -42,7 +42,7 @@ parser.add_argument(
     "--worlds",
     type=int,
     metavar="N",
-    help="Number of MC worlds to generate (default: N_WORLDS_DEFAULT)"
+    help="Number of MC worlds to generate (default: N_WORLDS_TEST)"
 )
 parser.add_argument(
     "--publish",

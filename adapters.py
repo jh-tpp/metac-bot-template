@@ -48,8 +48,16 @@ def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict
         else:
             probs = [1.0 / k] * k
         
-        # Map to option labels (original format uses dict)
-        prob_dict = {option: probs[i] for i, option in enumerate(options)}
+        # Map to option names (extract from dict or use as-is if string)
+        # Options can be list of dicts with 'name' key or list of strings
+        option_names = []
+        for opt in options:
+            if isinstance(opt, dict):
+                option_names.append(opt.get("name", str(opt)))
+            else:
+                option_names.append(str(opt))
+        
+        prob_dict = {option_names[i]: probs[i] for i in range(len(option_names))}
         
         return {
             "probability_yes": None,
@@ -78,7 +86,7 @@ def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
         token: Metaculus API token
         trace: Optional DiagnosticTrace for saving diagnostics
     
-    Raises on failure.
+    Raises on failure with detailed error information.
     
     Note: This uses the original /api/ endpoint with array format: [{"question": <id>, ...}]
     """
@@ -97,6 +105,9 @@ def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
             **payload,
         }
     ]
+    
+    # Pre-submission validation
+    _validate_payload_before_submit(question_id, payload)
     
     # Save submission payload diagnostics
     if trace:
@@ -155,7 +166,92 @@ def submit_forecast(question_id: int, payload: Dict, token: str, trace=None):
         except Exception as e:
             print(f"[WARN] Failed to save submission response diagnostics: {e}", flush=True)
     
-    resp.raise_for_status()
+    # Enhanced error handling for non-2xx responses
+    if not resp.ok:
+        error_msg = f"[FORECAST ERROR] question_id={question_id} status={resp.status_code}\n"
+        error_msg += f"  payload={request_body}\n"
+        
+        try:
+            error_body = resp.json()
+            error_msg += f"  response={error_body}\n"
+            
+            # Extract field-level errors if present
+            if isinstance(error_body, dict):
+                for field, messages in error_body.items():
+                    if isinstance(messages, list):
+                        error_msg += f"  field_error[{field}]={messages}\n"
+                    else:
+                        error_msg += f"  field_error[{field}]={messages}\n"
+        except Exception:
+            error_body = resp.text[:500]
+            error_msg += f"  response_text={error_body}\n"
+        
+        print(error_msg, flush=True)
+        resp.raise_for_status()
+
+
+def _validate_payload_before_submit(question_id: int, payload: Dict):
+    """
+    Validate payload before submission to catch common errors early.
+    
+    Args:
+        question_id: Question ID for logging
+        payload: Submission payload to validate
+    
+    Raises:
+        ValueError: If validation fails
+    """
+    # Binary validation
+    if payload.get("probability_yes") is not None:
+        p = payload["probability_yes"]
+        if not isinstance(p, (int, float)):
+            raise ValueError(f"Q{question_id}: probability_yes must be numeric, got {type(p)}")
+        if not (0.01 <= p <= 0.99):
+            raise ValueError(f"Q{question_id}: probability_yes={p} outside [0.01, 0.99]")
+    
+    # Multiple choice validation
+    if payload.get("probability_yes_per_category") is not None:
+        probs = payload["probability_yes_per_category"]
+        if not isinstance(probs, dict):
+            raise ValueError(f"Q{question_id}: probability_yes_per_category must be dict, got {type(probs)}")
+        
+        # Check all values are numeric and in [0, 1]
+        for option, prob in probs.items():
+            if not isinstance(prob, (int, float)):
+                raise ValueError(f"Q{question_id}: option '{option}' has non-numeric prob {type(prob)}")
+            if not (0.0 <= prob <= 1.0):
+                raise ValueError(f"Q{question_id}: option '{option}' prob={prob} outside [0, 1]")
+        
+        # Check sum is approximately 1.0
+        total = sum(probs.values())
+        if abs(total - 1.0) > 0.01:
+            raise ValueError(f"Q{question_id}: probabilities sum to {total}, not 1.0")
+    
+    # Numeric validation
+    if payload.get("continuous_cdf") is not None:
+        cdf = payload["continuous_cdf"]
+        if not isinstance(cdf, list):
+            raise ValueError(f"Q{question_id}: continuous_cdf must be list, got {type(cdf)}")
+        
+        if len(cdf) != 201:
+            raise ValueError(f"Q{question_id}: continuous_cdf must have 201 points, got {len(cdf)}")
+        
+        # Check values are in [0, 1] and monotonic
+        for i, val in enumerate(cdf):
+            if not isinstance(val, (int, float)):
+                raise ValueError(f"Q{question_id}: continuous_cdf[{i}] is non-numeric")
+            if not (0.0 <= val <= 1.0):
+                raise ValueError(f"Q{question_id}: continuous_cdf[{i}]={val} outside [0, 1]")
+            if i > 0 and val < cdf[i-1]:
+                raise ValueError(f"Q{question_id}: continuous_cdf not monotonic at index {i}")
+        
+        # Enforce endpoints
+        if abs(cdf[0]) > 1e-6:
+            print(f"[WARN] Q{question_id}: continuous_cdf[0]={cdf[0]}, should be ~0.0; adjusting", flush=True)
+            cdf[0] = 0.0
+        if abs(cdf[-1] - 1.0) > 1e-6:
+            print(f"[WARN] Q{question_id}: continuous_cdf[-1]={cdf[-1]}, should be 1.0; adjusting", flush=True)
+            cdf[-1] = 1.0
 
 
 def submit_comment(post_id: int, comment_text: str, token: str, trace=None):

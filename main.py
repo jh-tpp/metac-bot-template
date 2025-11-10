@@ -46,8 +46,8 @@ from metaculus_posts import (
 )
 
 # ========== Constants ==========
-N_WORLDS_DEFAULT = 100  # for tests
-N_WORLDS_TOURNAMENT = 100  # flip to this for production
+N_WORLDS_TEST = 100  # for tests
+N_WORLDS_TOURNAMENT = 100  # for production
 ASKNEWS_MAX_PER_Q = 8
 NEWS_CACHE_TTL_HOURS = 168
 CACHE_DIR = Path("cache")
@@ -123,12 +123,22 @@ def _write_open_ids(pairs):
 def _load_posted_ids():
     """
     Load list of already-posted question IDs from .aib-state/posted_ids.json.
+    Creates an empty file if it doesn't exist (idempotent).
     
     Returns:
         set of question IDs (integers)
     """
+    _ensure_state_dir()
     posted_file = AIB_STATE_DIR / "posted_ids.json"
+    
     if not posted_file.exists():
+        # Create empty file for idempotency
+        try:
+            with open(posted_file, "w") as f:
+                json.dump([], f, indent=2)
+            print(f"[INFO] Created empty {posted_file}")
+        except Exception as e:
+            print(f"[WARN] Failed to create {posted_file}: {e}")
         return set()
     
     try:
@@ -2020,8 +2030,35 @@ def post_forecast_safe(question_obj, mc_result, publish=False, skip_set=None, tr
             print(f"[INFO] Added Q{qid} to .aib-state/posted_ids.json")
         
         return True
+    except requests.exceptions.HTTPError as e:
+        # Enhanced error logging for HTTP errors
+        status = getattr(e.response, "status_code", "N/A")
+        
+        error_msg = f"[FORECAST ERROR] Q{qid} HTTP {status}\n"
+        error_msg += f"  Question type: {question_obj.get('type', 'unknown')}\n"
+        error_msg += f"  Payload: {payload}\n"
+        
+        # Try to extract detailed error from response
+        try:
+            error_body = e.response.json()
+            error_msg += f"  API response: {error_body}\n"
+            
+            # Extract field-level errors if present
+            if isinstance(error_body, dict):
+                for field, messages in error_body.items():
+                    if isinstance(messages, list):
+                        error_msg += f"  → field '{field}': {', '.join(str(m) for m in messages)}\n"
+                    else:
+                        error_msg += f"  → field '{field}': {messages}\n"
+        except Exception:
+            error_body = getattr(e.response, "text", str(e))[:500]
+            error_msg += f"  Response text (truncated): {error_body}\n"
+        
+        print(error_msg, flush=True)
+        return False
     except Exception as e:
         print(f"[ERROR] Failed to post Q{qid}: {e}")
+        traceback.print_exc()
         return False
 
 # ========== Live Test & Smoke Test Helpers ==========
@@ -2216,7 +2253,7 @@ def run_live_test():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2263,10 +2300,10 @@ def run_submit_smoke_test(test_qid, publish=False, n_worlds=None):
     Args:
         test_qid: Metaculus question ID to test (int)
         publish: If True, actually submit forecast; otherwise just dry-run
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST)
     """
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TEST
     
     print(f"[SUBMIT SMOKE TEST] Starting for Q{test_qid} (publish={publish}, worlds={n_worlds})...", flush=True)
     
@@ -2490,7 +2527,7 @@ def run_test_mode():
         mc_out = run_mc_worlds(
             question_obj=q,
             context_facts=facts,
-            n_worlds=N_WORLDS_DEFAULT,
+            n_worlds=N_WORLDS_TEST,
             return_evidence=True,
             trace=trace
         )
@@ -2601,13 +2638,13 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
         mode: "dryrun" or "submit"
         publish: If True, actually submit forecasts
         force: If True, ignore posted_ids.json and forecast on all questions
-        n_worlds: Number of MC worlds to generate (default: N_WORLDS_DEFAULT)
+        n_worlds: Number of MC worlds to generate (default: N_WORLDS_TEST for test modes, N_WORLDS_TOURNAMENT for tournament)
     
     Writes state files: .aib-state/open_ids.json (dryrun), posted_ids.json (submit).
     """
-    # Use provided n_worlds or default
+    # Use provided n_worlds or default to N_WORLDS_TOURNAMENT for tournament mode
     if n_worlds is None:
-        n_worlds = N_WORLDS_DEFAULT
+        n_worlds = N_WORLDS_TOURNAMENT
     # Log configuration once as required
     print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
     print(f"[TOURNAMENT MODE: {mode}] Starting... (force={force}, worlds={n_worlds})")
@@ -2625,7 +2662,7 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     
     # Handle zero questions gracefully
     if not questions:
-        print(f"[INFO] No open questions in tournament {FALL_2025_AIB_TOURNAMENT}; wrote empty artifacts and exiting gracefully.")
+        print(f"[INFO] No open questions in tournament {FALL_2025_AIB_TOURNAMENT}; skipping artifact creation and exiting gracefully.")
         
         # Create .aib-state directory if needed
         AIB_STATE_DIR.mkdir(exist_ok=True)
@@ -2636,18 +2673,8 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
             json.dump([], f, indent=2)
         print(f"[INFO] Wrote empty {open_ids_file}")
         
-        # Write empty mc_results.json with summary structure
-        summary = {
-            "results": [],
-            "count": 0,
-            "tournament": FALL_2025_AIB_TOURNAMENT,
-            "status": f"{mode}_empty"
-        }
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print(f"[INFO] Wrote empty mc_results.json")
-        
-        # Write empty posted_ids.json in submit mode
+        # Do NOT write mc_results.json or mc_reasons.txt when no questions found
+        # Only write posted_ids.json in submit mode for workflow compatibility
         if mode == "submit" and publish:
             with open("posted_ids.json", "w", encoding="utf-8") as f:
                 json.dump([], f, indent=2)
@@ -2680,15 +2707,13 @@ def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     print(f"[INFO] Processing {len(questions_to_process)} new questions (skipped {skipped_count} already posted)")
     
     if not questions_to_process:
-        print(f"[INFO] No new questions to process")
-        # Still write artifacts
-        with open("mc_results.json", "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2, ensure_ascii=False)
-        with open("mc_reasons.txt", "w", encoding="utf-8") as f:
-            f.write("")
+        print(f"[INFO] No new questions to process; skipping artifact creation")
+        # Do NOT write mc_results.json or mc_reasons.txt when no new questions
+        # Only write posted_ids.json in submit mode for workflow compatibility
         if mode == "submit" and publish:
             with open("posted_ids.json", "w", encoding="utf-8") as f:
                 json.dump([], f, indent=2)
+            print(f"[INFO] Wrote empty posted_ids.json")
         return
     
     qid_to_text = {q["id"]: q["title"] + " " + q.get("description", "") for q in questions_to_process}
@@ -2794,7 +2819,7 @@ def main():
         "--worlds",
         type=int,
         metavar="N",
-        help="Number of MC worlds to generate (default: N_WORLDS_DEFAULT)"
+        help="Number of MC worlds to generate (default: N_WORLDS_TEST)"
     )
     parser.add_argument(
         "--publish",
