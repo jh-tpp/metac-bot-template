@@ -2,6 +2,12 @@ name: Forecast on new AI tournament questions
 
 on:
   workflow_dispatch:
+    inputs:
+      simulations:
+        description: 'Number of Monte Carlo simulations/worlds to run'
+        required: false
+        default: '200'
+        type: string
   schedule:
     - cron: "*/30 * * * *" # runs every 10 minutes
 
@@ -48,11 +54,24 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
       
-      # Step 1: Dry run to discover open questions
-      - name: Run bot (dry run)
-        id: dryrun
+      # Step 1: Safety check for METACULUS_TOKEN
+      - name: Check METACULUS_TOKEN
         run: |
-          poetry run python main.py --mode tournament_dryrun
+          if [ -z "${{ secrets.METACULUS_TOKEN }}" ]; then
+            echo "Error: METACULUS_TOKEN is not set. Cannot run in tournament mode."
+            echo "Please set METACULUS_TOKEN in repository secrets."
+            exit 1
+          fi
+          echo "METACULUS_TOKEN is set, proceeding with tournament run."
+      
+      # Step 2: Run bot in tournament mode with configurable simulations
+      - name: Run bot (tournament run)
+        id: tournament_run
+        run: |
+          SIMULATIONS="${{ inputs.simulations || env.WORLDS || '200' }}"
+          echo "[MODE] tournament_submit"
+          echo "[SIMULATIONS] Running with ${SIMULATIONS} worlds"
+          poetry run python main.py --mode tournament_submit --worlds ${SIMULATIONS}
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
@@ -68,96 +87,8 @@ jobs:
           METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
           METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
       
-      # Step 2: Determine if we should submit (diff open_ids vs posted_ids)
-      - name: Check for new questions
-        id: check_new
-        run: |
-          mkdir -p .aib-state
-          
-          # Ensure open_ids.json exists (now in .aib-state/)
-          if [ ! -f .aib-state/open_ids.json ]; then
-            echo "Error: .aib-state/open_ids.json not found"
-            echo "should_submit=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Load open IDs from .aib-state/
-          open_ids=$(cat .aib-state/open_ids.json)
-          
-          # Load posted IDs (create empty if doesn't exist)
-          if [ ! -f .aib-state/posted_ids.json ]; then
-            echo "[]" > .aib-state/posted_ids.json
-          fi
-          posted_ids=$(cat .aib-state/posted_ids.json)
-          
-          # Calculate new IDs using Python
-          new_ids=$(python3 - <<'PYEOF'
-          import json
-          import sys
-          
-          try:
-              # Read from .aib-state/
-              with open('.aib-state/open_ids.json', 'r') as f:
-                  open_data = json.load(f)
-                  # Handle both list of ints and list of dicts with question_id
-                  if isinstance(open_data, list) and len(open_data) > 0:
-                      if isinstance(open_data[0], dict):
-                          open_ids = set(item['question_id'] for item in open_data)
-                      else:
-                          open_ids = set(open_data)
-                  else:
-                      open_ids = set()
-              
-              with open('.aib-state/posted_ids.json', 'r') as f:
-                  posted_ids = set(json.load(f))
-              
-              new_ids = list(open_ids - posted_ids)
-              
-              with open('new_ids.json', 'w') as f:
-                  json.dump(new_ids, f, indent=2)
-              
-              print(f"Found {len(new_ids)} new question(s)", file=sys.stderr)
-              print(json.dumps(new_ids))
-              
-              if len(new_ids) > 0:
-                  sys.exit(0)
-              else:
-                  sys.exit(1)
-          except Exception as e:
-              print(f"Error: {e}", file=sys.stderr)
-              sys.exit(1)
-          PYEOF
-          )
-          
-          if [ $? -eq 0 ]; then
-            echo "should_submit=true" >> $GITHUB_OUTPUT
-            echo "New questions found, will submit"
-          else
-            echo "should_submit=false" >> $GITHUB_OUTPUT
-            echo "No new questions, skipping submit"
-          fi
-      
-      # Step 3: Submit forecasts if new questions exist
-      - name: Run bot (submit)
-        if: steps.check_new.outputs.should_submit == 'true'
-        run: |
-          poetry run python main.py --mode tournament_submit
-        env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-          METACULUS_PROJECT_ID: ${{ vars.METACULUS_PROJECT_ID || '32813' }}
-          METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
-          METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
-      
-      # Step 4: Merge posted IDs and save state
+      # Step 3: Update state cache
       - name: Update state cache
-        if: steps.check_new.outputs.should_submit == 'true'
         run: |
           # Merge posted_ids.json into .aib-state/posted_ids.json
           python3 - <<'PYEOF'
@@ -215,13 +146,6 @@ jobs:
         with:
           name: posted-ids
           path: posted_ids.json
-      
-      - name: Upload new IDs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: new-ids
-          path: new_ids.json
       
       - name: Upload diagnostic traces
         if: always()
