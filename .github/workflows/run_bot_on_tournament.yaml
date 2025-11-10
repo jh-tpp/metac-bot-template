@@ -6,10 +6,10 @@ on:
       simulations:
         description: 'Number of Monte Carlo simulations/worlds to run'
         required: false
-        default: '200'
+        default: '100'
         type: string
   schedule:
-    - cron: "*/30 * * * *" # runs every 10 minutes
+    - cron: "*/20 * * * *" # runs every 10 minutes
 
 # Add concurrency group to prevent parallel runs
 concurrency:
