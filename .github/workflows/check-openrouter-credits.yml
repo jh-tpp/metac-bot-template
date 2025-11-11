@@ -3,7 +3,7 @@ name: Check OpenRouter Credits
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 8 * * *"  # daily at 08:17 UTC
+    - cron: "0 */3 * * *"  #every 3 h
 
 jobs:
   check:
