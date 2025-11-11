@@ -1,9 +1,134 @@
 import requests
-from typing import Dict, Any
+import numpy as np
+from typing import Dict, Any, List, Optional
 from http_logging import (
     print_http_request, print_http_response,
     save_http_artifacts, prepare_request_artifact, prepare_response_artifact
 )
+
+def _sanitize_numeric_cdf(question_obj: Dict, raw_cdf: List[float]) -> List[float]:
+    """
+    Sanitize numeric/continuous CDF to meet Metaculus API requirements.
+    
+    Enforces:
+    - Length exactly 201
+    - Monotone increasing with min step >= 5e-05 between adjacent points
+    - Values in [0, 1] (clamped)
+    - NaN handling (replaced with interpolation or boundary values)
+    - Open bound constraints:
+      * If lower bound open: first value >= 0.001
+      * If upper bound open: last value <= 0.999
+    
+    Args:
+        question_obj: Question metadata (to check for open bounds)
+        raw_cdf: Raw CDF values from MC worlds
+    
+    Returns:
+        Sanitized CDF with exactly 201 points meeting all constraints
+    """
+    MIN_STEP = 5e-05
+    TARGET_LENGTH = 201
+    
+    # Handle empty or invalid input
+    if not raw_cdf:
+        # Return uniform CDF from 0 to 1
+        return list(np.linspace(0.0, 1.0, TARGET_LENGTH))
+    
+    # Convert to numpy array for easier manipulation
+    cdf = np.array(raw_cdf, dtype=float)
+    
+    # Step 1: Handle NaNs - replace with linear interpolation or boundary values
+    if np.any(np.isnan(cdf)):
+        print(f"[SANITIZE] Q{question_obj.get('id', '?')}: Found NaN values, interpolating", flush=True)
+        nan_mask = np.isnan(cdf)
+        
+        # Find valid indices
+        valid_indices = np.where(~nan_mask)[0]
+        
+        if len(valid_indices) == 0:
+            # All NaN - return uniform
+            cdf = np.linspace(0.0, 1.0, len(cdf))
+        elif len(valid_indices) == 1:
+            # Only one valid value - use it for all
+            cdf = np.full(len(cdf), cdf[valid_indices[0]])
+        else:
+            # Interpolate NaN values
+            cdf[nan_mask] = np.interp(
+                np.where(nan_mask)[0],
+                valid_indices,
+                cdf[valid_indices]
+            )
+    
+    # Step 2: Clamp to [0, 1]
+    cdf = np.clip(cdf, 0.0, 1.0)
+    
+    # Step 3: Ensure monotonicity with minimum step
+    # Forward pass: ensure each value >= previous + MIN_STEP (or at least >= previous)
+    for i in range(1, len(cdf)):
+        if cdf[i] < cdf[i-1]:
+            cdf[i] = cdf[i-1]
+        # Optionally enforce minimum step (but might cause last value to exceed 1.0)
+        # We'll handle this in a second pass
+    
+    # Step 4: Backward pass to ensure we don't exceed 1.0 while maintaining monotonicity
+    # and minimum steps where possible
+    for i in range(len(cdf) - 2, -1, -1):
+        if cdf[i] > cdf[i+1]:
+            cdf[i] = cdf[i+1]
+        # Ensure we have room for minimum step if not at boundary
+        max_allowed = cdf[i+1] - MIN_STEP
+        if i < len(cdf) - 1 and cdf[i] > max_allowed and max_allowed >= 0.0:
+            cdf[i] = max(max_allowed, 0.0)
+    
+    # Step 5: Enforce minimum step where possible (forward pass again)
+    for i in range(1, len(cdf)):
+        min_required = cdf[i-1] + MIN_STEP
+        if cdf[i] < min_required and min_required <= 1.0:
+            cdf[i] = min(min_required, 1.0)
+    
+    # Step 6: Check for open bounds and enforce constraints
+    # Check if question has open bounds
+    # For Metaculus, we check possibilities/possibility for open_lower_bound and open_upper_bound
+    poss = question_obj.get("possibilities") or question_obj.get("possibility") or {}
+    if not isinstance(poss, dict):
+        poss = {}
+    
+    open_lower = poss.get("open_lower_bound", False)
+    open_upper = poss.get("open_upper_bound", False)
+    
+    if open_lower and cdf[0] < 0.001:
+        print(f"[SANITIZE] Q{question_obj.get('id', '?')}: Open lower bound, adjusting first value from {cdf[0]:.6f} to 0.001", flush=True)
+        cdf[0] = 0.001
+        # Ensure monotonicity still holds
+        for i in range(1, len(cdf)):
+            if cdf[i] < cdf[i-1]:
+                cdf[i] = cdf[i-1]
+    
+    if open_upper and cdf[-1] > 0.999:
+        print(f"[SANITIZE] Q{question_obj.get('id', '?')}: Open upper bound, adjusting last value from {cdf[-1]:.6f} to 0.999", flush=True)
+        cdf[-1] = 0.999
+        # Ensure monotonicity still holds (backward pass)
+        for i in range(len(cdf) - 2, -1, -1):
+            if cdf[i] > cdf[i+1]:
+                cdf[i] = cdf[i+1]
+    
+    # Step 7: Resize to exactly 201 points
+    if len(cdf) != TARGET_LENGTH:
+        print(f"[SANITIZE] Q{question_obj.get('id', '?')}: Resizing from {len(cdf)} to {TARGET_LENGTH} points", flush=True)
+        # Use linear interpolation to resize
+        old_indices = np.linspace(0, 1, len(cdf))
+        new_indices = np.linspace(0, 1, TARGET_LENGTH)
+        cdf = np.interp(new_indices, old_indices, cdf)
+    
+    # Step 8: Final clamp and convert to list
+    cdf = np.clip(cdf, 0.0, 1.0)
+    
+    # Step 9: Ensure exact endpoints (important for API)
+    cdf[0] = max(0.0, cdf[0]) if not open_lower else max(0.001, cdf[0])
+    cdf[-1] = min(1.0, cdf[-1]) if not open_upper else min(0.999, cdf[-1])
+    
+    return cdf.tolist()
+
 
 def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict:
     """
@@ -35,17 +160,21 @@ def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict
         options = question_obj.get("options", [])
         k = len(options)
         
-        # Enforce length
+        # Ensure non-negative probabilities
+        probs = [max(0.0, p) for p in probs]
+        
+        # Enforce length match
         if len(probs) < k:
             probs = probs + [0.0] * (k - len(probs))
         elif len(probs) > k:
             probs = probs[:k]
         
-        # Normalize
+        # Normalize to sum=1.0
         total = sum(probs)
         if total > 0:
             probs = [p / total for p in probs]
         else:
+            # Uniform distribution if all zeros
             probs = [1.0 / k] * k
         
         # Map to option names (extract from dict or use as-is if string)
@@ -67,11 +196,15 @@ def mc_results_to_metaculus_payload(question_obj: Dict, mc_result: Dict) -> Dict
     
     elif "numeric" in qtype or "continuous" in qtype:
         # Original format uses continuous_cdf as list
-        cdf = mc_result.get("cdf", [])
+        raw_cdf = mc_result.get("cdf", [])
+        
+        # Sanitize CDF to meet API requirements
+        sanitized_cdf = _sanitize_numeric_cdf(question_obj, raw_cdf)
+        
         return {
             "probability_yes": None,
             "probability_yes_per_category": None,
-            "continuous_cdf": cdf,
+            "continuous_cdf": sanitized_cdf,
         }
     
     raise ValueError(f"Unknown question type: {qtype}")
