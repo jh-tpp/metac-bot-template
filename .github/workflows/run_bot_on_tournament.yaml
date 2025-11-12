@@ -62,7 +62,14 @@ jobs:
       - name: Check for new questions
         id: check_new
         run: |
-          # Fetch open questions and compare with posted history
+          # === PHASE 1: FETCH ===
+          # Unconditionally fetch fresh open question IDs from Metaculus API
+          echo "[PHASE 1] Fetching fresh open question IDs from Metaculus..."
+          poetry run python main.py --mode tournament_dryrun
+          
+          # === PHASE 2: COMPARE ===
+          # Compare fresh open IDs against posted history
+          echo "[PHASE 2] Comparing open questions against posted history..."
           python3 - <<'PYEOF'
           import json
           import os
@@ -75,14 +82,14 @@ jobs:
           
           print(f"[INFO] N_WORLDS_TOURNAMENT={n_worlds}")
           
-          # Load posted IDs from cache
+          # Load posted IDs from cache (empty set if file doesn't exist)
           try:
               with open('.aib-state/posted_ids.json', 'r') as f:
                   posted_ids = set(json.load(f))
           except:
               posted_ids = set()
           
-          # Load open IDs if available from previous run
+          # Load fresh open IDs from dryrun (guaranteed to exist after Phase 1)
           try:
               with open('.aib-state/open_ids.json', 'r') as f:
                   open_data = json.load(f)
@@ -98,19 +105,20 @@ jobs:
                               open_ids.add(item)
                   else:
                       open_ids = set()
-          except:
-              # If open_ids.json doesn't exist, we should run to create it
-              open_ids = set([0])  # Dummy value to ensure we run
+          except Exception as e:
+              print(f"[ERROR] Failed to load open_ids.json after dryrun: {e}")
+              open_ids = set()
           
-          # Compute new questions
+          # === PHASE 3: DECIDE ===
+          # Compute new questions and decide whether to submit
           new_questions = open_ids - posted_ids
           
           print(f"[INFO] Open questions: {len(open_ids)}")
           print(f"[INFO] Posted questions: {len(posted_ids)}")
           print(f"[INFO] New questions: {len(new_questions)}")
           
-          # Determine if we should submit
-          should_submit = len(new_questions) > 0 or len(open_ids) == 0
+          # Submit ONLY if there are genuinely new questions
+          should_submit = len(new_questions) > 0
           
           # Write to GitHub output
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
@@ -120,6 +128,17 @@ jobs:
           PYEOF
         env:
           N_WORLDS_TOURNAMENT: "100"
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          METACULUS_PROJECT_ID: ${{ vars.METACULUS_PROJECT_ID || '32813' }}
+          METACULUS_PROJECT_SLUG: ${{ vars.METACULUS_PROJECT_SLUG || 'fall-aib-2025' }}
+          METACULUS_CONTEST_SLUG: ${{ vars.METACULUS_CONTEST_SLUG || 'fall-aib' }}
       
       # Step 3: Run bot in tournament mode (only if should_submit)
       - name: Run bot (tournament run)
