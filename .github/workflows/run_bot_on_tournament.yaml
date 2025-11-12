@@ -65,7 +65,7 @@ jobs:
           # === PHASE 1: FETCH ===
           # Unconditionally fetch fresh open question IDs from Metaculus API
           echo "[PHASE 1] Fetching fresh open question IDs from Metaculus..."
-          poetry run python main.py --mode tournament_dryrun
+          poetry run python main.py --mode tournament_open_check
           
           # === PHASE 2: COMPARE ===
           # Compare fresh open IDs against posted history
