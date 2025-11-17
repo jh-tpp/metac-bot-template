@@ -2627,6 +2627,30 @@ def tournament_dryrun(tournament_slug: str = None):
     print(f"[TOURNAMENT DRYRUN] Complete. Wrote .aib-state/open_ids.json and mc_results.json for {len(pairs)} questions")
 
 
+def tournament_open_check():
+    """
+    Fetch-only mode: fetch open question IDs from tournament and write .aib-state/open_ids.json.
+    
+    This is a minimal, clean operation that:
+    - Fetches (question_id, post_id) pairs from Fall 2025 AIB tournament
+    - Writes .aib-state/open_ids.json via fetch_open_pairs()
+    - Does NOT write mc_results.json, mc_reasons.txt, or any other artifacts
+    - Exits successfully (code 0) even when zero questions found
+    
+    Used by CI workflow to check for new questions without generating forecasting artifacts.
+    """
+    print(f"[CONFIG] Using hardcoded tournament: {FALL_2025_AIB_TOURNAMENT}")
+    print(f"[TOURNAMENT OPEN CHECK] Fetch-only mode - will write .aib-state/open_ids.json only")
+    
+    # Fetch (question_id, post_id) pairs from tournament using unified function
+    # This automatically writes .aib-state/open_ids.json
+    pairs = fetch_open_pairs()
+    
+    # Print summary
+    print(f"[TOURNAMENT OPEN CHECK] Found {len(pairs)} open question(s)")
+    print(f"[TOURNAMENT OPEN CHECK] Complete. Wrote .aib-state/open_ids.json")
+
+
 def run_tournament(mode="dryrun", publish=False, force=False, n_worlds=None):
     """
     Fetch tournament questions, run MC, post (if publish=True).
@@ -2799,7 +2823,7 @@ def main():
     parser = argparse.ArgumentParser(description="Metaculus MC Bot")
     parser.add_argument(
         "--mode",
-        choices=["test_questions", "tournament_dryrun", "tournament_submit", "submit_smoke_test"],
+        choices=["test_questions", "tournament_dryrun", "tournament_open_check", "tournament_submit", "submit_smoke_test"],
         help="Run mode (deprecated for some, use specific flags instead)"
     )
     parser.add_argument(
@@ -2892,6 +2916,9 @@ def main():
                 except ValueError:
                     parser.error(f"WORLDS environment variable must be a valid integer, got '{worlds_from_env}'")
             tournament_dryrun()
+        elif args.mode == "tournament_open_check":
+            # Fetch-only mode: no worlds parameter needed
+            tournament_open_check()
         elif args.mode == "tournament_submit":
             # Use --force or FORCE env var
             force = args.force or _parse_bool_flag(force_from_env, default=False)
