@@ -127,7 +127,7 @@ jobs:
           print(f"[INFO] should_submit={'true' if should_submit else 'false'}")
           PYEOF
         env:
-          N_WORLDS_TOURNAMENT: "100"
+          N_WORLDS_TOURNAMENT: "500"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -156,7 +156,7 @@ jobs:
         # this reads the environment variables from the github repository.
         # Store under Settings --> Secrets and variables --> Actions
         env:
-          N_WORLDS_TOURNAMENT: "100"
+          N_WORLDS_TOURNAMENT: "600"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
